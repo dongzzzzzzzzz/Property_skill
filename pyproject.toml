@@ -1,0 +1,10 @@
+[project]
+name = "property-skills"
+version = "0.1.0"
+description = "Property vertical skills built on top of external marketplace skills such as ok-core-skill."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
