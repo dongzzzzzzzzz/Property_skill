@@ -13,7 +13,7 @@ description: |
 
 ```bash
 # 找房
-python scripts/cli.py search_properties --provider ok --country singapore --city singapore --keyword "apartment" --budget-max 3500 --bedrooms 2 --rent-or-sale rent --feature furnished
+python scripts/run_property_c_search.py --provider ok --country singapore --city singapore --keyword "apartment" --budget-max 3500 --bedrooms 2 --rent-or-sale rent --feature furnished --max-results 100
 
 # 比较房源
 python scripts/cli.py compare_properties --provider ok --url "<url-1>" --url "<url-2>"
@@ -36,7 +36,12 @@ python scripts/cli.py find_nearby_schools --provider ok --url "<listing-url>"
 
 ## 输出使用方式
 
+- 找房入口优先使用 `python scripts/run_property_c_search.py ...`，不要直接调用 `ok-core-skill` 的 `search` 或 `browse-category`。
+- 除非用户明确要求只看少量样本，否则不要把 `--max-results` 改成低于 `100`。
+- 不建议上层显式传 `--detail-limit`；详情抓取由 skill 内部分层控制。
+
 - `search_properties` 的返回里优先使用 `decision_mode`、`result_judgement`、`query_fit_summary`、`recommended_listings`、`watchlist_candidates`、`analysis_sections`、`user_facing_response`。
+- 如果上层会二次摘要，优先消费 `render_ready_summary`、`decision_brief`、`must_show_findings`、`recommendation_cards_compact`、`why_these_listings`、`why_not_more`、`sample_basis_short`。
 - 同时优先消费 `compare_matrix`、`field_status`、`known_fields`、`missing_fields`，不要把关键字段缺失隐藏掉。
 - 不要直接把 `listings` 原样平铺给用户；`listings` 主要用于调试和上层二次处理。
 - 推荐区只在 `decision_mode = recommend` 时展示，且优先使用 `recommended_listings[].decision_reason`、`recommended_listings[].why_not_ideal`、`recommended_listings[].url`、`recommended_listings[].primary_image_url`、`recommended_listings[].image_note`。
@@ -49,6 +54,7 @@ python scripts/cli.py find_nearby_schools --provider ok --url "<listing-url>"
 - `field_sources` 和 `decision_mode` 是上层消费的硬约束，不得忽略。
 - 推荐/观察项卡片必须显式提供 `url` 和 `primary_image_url`；即使当前只有占位图，也不能把图片字段省略掉。
 - `user_facing_response` 必须包含详情入口、图片状态说明，以及“本轮到底比较了多少条样本”的说明。
+- `recommendation_cards_compact` 是上层首选展示源；不要只摘标题、价格和区域表格。
 
 更完整的字段契约见 [output-contract](/Users/a58/Desktop/Property_skill/references/output-contract.md)。
 

@@ -250,6 +250,47 @@ def search_properties(
     )
     analysis_sections["comparison_takeaways"] = compare_matrix.get("comparison_takeaways", [])
     analysis_sections["field_coverage"] = field_coverage
+    sample_basis_short, sample_size_level = _build_sample_basis_short(
+        candidate_pool_size=search_meta["candidate_pool_size"],
+        detail_hydrated_count=search_meta["detail_hydrated_count"],
+    )
+    compare_matrix["sample_size_level"] = sample_size_level
+    compare_matrix["sample_basis_short"] = sample_basis_short
+    compare_takeaways_short = _build_compare_takeaways_short(candidate_source or enriched)
+    why_these_listings = _build_why_these_listings(
+        recommended_listings=recommended_listings,
+        watchlist_candidates=watchlist_candidates,
+        decision_mode=decision_context["decision_mode"],
+    )
+    why_not_more = _build_why_not_more(
+        decision_mode=decision_context["decision_mode"],
+        excluded_summary=excluded_summary,
+    )
+    image_and_link_summary = _build_image_and_link_summary(candidate_source or enriched)
+    must_show_findings = _build_must_show_findings(
+        candidate_source=candidate_source or enriched,
+        sample_basis_short=sample_basis_short,
+        sample_size_level=sample_size_level,
+        compare_takeaways_short=compare_takeaways_short,
+    )
+    recommendation_cards_compact = _build_recommendation_cards_compact(candidate_source or enriched)
+    decision_brief = {
+        "final_verdict": decision_context["result_judgement"],
+        "confidence_label": result_quality["label"],
+        "sample_basis_short": sample_basis_short,
+        "core_recommendation_logic": why_these_listings,
+        "top_risks": must_show_findings[:3],
+    }
+    analysis_snapshot = {
+        "what_we_compared": compare_takeaways_short,
+        "why_these_listings": why_these_listings,
+        "why_not_more": why_not_more,
+        "how_reliable_this_round_is": sample_basis_short,
+    }
+    render_ready_summary = _build_render_ready_summary(
+        decision_brief=decision_brief,
+        must_show_findings=must_show_findings,
+    )
     user_facing_response = _build_user_facing_response(
         decision_mode=decision_context["decision_mode"],
         result_judgement=decision_context["result_judgement"],
@@ -285,11 +326,16 @@ def search_properties(
         "summary": {
             "provider_results": search_meta["provider_results"],
             "candidate_pool_size": search_meta["candidate_pool_size"],
+            "property_skill_requested_max_results": max_results,
+            "effective_candidate_pool_size": search_meta["candidate_pool_size"],
+            "underlying_provider_calls": len(search_meta["search_rounds"]),
             "search_rounds": search_meta["search_rounds"],
             "matched_results": len(enriched),
             "detail_hydrated_count": search_meta["detail_hydrated_count"],
             "shallow_only_count": search_meta["shallow_only_count"],
             "confidence_basis": confidence_basis,
+            "sample_basis_short": sample_basis_short,
+            "sample_size_level": sample_size_level,
             "price_overview_monthly": listing_price_summary(peers),
             "excluded_outlier_count": excluded_outlier_count,
             "area_distribution": area_distribution,
@@ -310,6 +356,18 @@ def search_properties(
         "decision_summary": decision_summary,
         "analysis_sections": analysis_sections,
         "next_step_suggestion": next_step_suggestion,
+        "decision_brief": decision_brief,
+        "analysis_snapshot": analysis_snapshot,
+        "render_ready_summary": render_ready_summary,
+        "must_show_findings": must_show_findings,
+        "recommendation_cards_compact": recommendation_cards_compact,
+        "why_these_listings": why_these_listings,
+        "why_not_more": why_not_more,
+        "sample_basis_short": sample_basis_short,
+        "compare_takeaways_short": compare_takeaways_short,
+        "image_and_link_summary": image_and_link_summary,
+        "property_skill_requested_max_results": max_results,
+        "effective_candidate_pool_size": search_meta["candidate_pool_size"],
         "user_facing_response": user_facing_response,
         "warnings": _build_search_warnings(
             target_point=target_point,
@@ -318,6 +376,7 @@ def search_properties(
             nyc_area_mode=nyc_area_mode,
             excluded_outlier_count=excluded_outlier_count,
             used_near_filter=bool(near or (near_lat is not None and near_lng is not None)),
+            requested_max_results=max_results,
         ),
         "confidence": _confidence_from_results(enriched),
     }
@@ -561,13 +620,14 @@ def _evaluate_strict_match(
     hard_miss = False
     off_target = False
     suspicious = bool(listing.price_anomaly.get("is_suspicious_low"))
+    is_nyc = (city or "").lower() in {"new-york", "new york"}
 
     match_level = area_match_level(listing, area, city=city, keyword=keyword)
     if match_level != "outside":
-        if listing.sub_area:
+        if is_nyc and listing.sub_area:
             fit_reasons.append(f"位置仍在目标范围内：{listing.sub_area}")
         elif listing.location_text:
-            fit_reasons.append(f"位置文本与目标城市匹配：{listing.location_text}")
+            fit_reasons.append(f"位置文本与目标城市匹配：{_clean_location_text(listing.location_text)}")
     else:
         off_target = True
         tradeoffs.append("位置明显偏离目标区域")
@@ -816,6 +876,20 @@ def _build_candidate_card(
         decision_reason = _compose_explain_reason(item, city=city)
     field_source_summary = build_field_source_summary(item)
     question_bundle = build_viewing_questions(item, comparison_pool=comparison_pool)
+    price_warning_cn = _translate_price_warning(item)
+    recommendation_reason_short = _build_recommendation_reason_short(
+        {
+            **item,
+            "compared_advantages": compared_advantages,
+            "decision_reason": decision_reason,
+        }
+    )
+    risk_summary_short = _build_risk_summary_short(
+        {
+            **item,
+            "price_warning_cn": price_warning_cn,
+        }
+    )
 
     return {
         "canonical_id": item["canonical_id"],
@@ -827,7 +901,10 @@ def _build_candidate_card(
         "image_note": item.get("image_note"),
         "price_text": item.get("price_text"),
         "monthly_price_value": item.get("monthly_price_value"),
+        "price_is_estimated_monthly": item.get("price_is_estimated_monthly"),
+        "price_brief": _build_price_brief(item),
         "location_text": item.get("location_text"),
+        "location_brief": _clean_location_text(item.get("location_text")),
         "rent_or_sale": item.get("rent_or_sale"),
         "fit_reasons": fit_reasons,
         "tradeoffs": tradeoffs,
@@ -835,6 +912,7 @@ def _build_candidate_card(
         "why_not_ideal": why_not_ideal,
         "decision_reason": decision_reason,
         "recommendation_reason": decision_reason,
+        "recommendation_reason_short": recommendation_reason_short,
         "suitable_for": suitable_for,
         "not_suitable_for": not_suitable_for,
         "decision_tag": decision_tag,
@@ -844,8 +922,10 @@ def _build_candidate_card(
         "missing_fields": item.get("missing_fields", []),
         "field_source_summary": field_source_summary,
         "price_analysis": item.get("price_analysis", {}),
+        "price_warning_cn": price_warning_cn,
         "compared_advantages": compared_advantages,
         "compared_disadvantages": compared_disadvantages,
+        "risk_summary_short": risk_summary_short,
         "key_missing_fields": item.get("missing_fields", []),
         "why_recommended": item.get("why_recommended"),
         **question_bundle,
@@ -1072,6 +1152,192 @@ def _build_confidence_basis(
     return basis + "。"
 
 
+def _build_sample_basis_short(
+    *,
+    candidate_pool_size: int,
+    detail_hydrated_count: int,
+) -> tuple[str, str]:
+    if candidate_pool_size >= 80:
+        return (
+            f"当前平台有效样本约 {candidate_pool_size} 条，其中 {detail_hydrated_count} 条进入详情分析，样本基数较大。",
+            "large",
+        )
+    if candidate_pool_size >= 30:
+        return (
+            f"当前平台有效样本约 {candidate_pool_size} 条，其中 {detail_hydrated_count} 条进入详情分析，样本基数中等。",
+            "medium",
+        )
+    return (
+        f"当前平台有效样本只有 {candidate_pool_size} 条，其中 {detail_hydrated_count} 条进入详情分析，样本仍有限。",
+        "small",
+    )
+
+
+def _build_compare_takeaways_short(candidate_source: list[dict]) -> list[str]:
+    if not candidate_source:
+        return ["当前没有足够候选可做有效比较。"]
+    takeaways = []
+    if len({_clean_location_text(item.get("location_text")) for item in candidate_source if item.get("location_text")}) == 1 and len(candidate_source) >= 2:
+        takeaways.append("当前推荐候选集中在同一位置，可能属于同一栋楼或同一类库存。")
+    if any(item.get("price_is_estimated_monthly") for item in candidate_source):
+        takeaways.append("至少有一条价格来自周租/日租折算月租，不能直接当成标准月租。")
+    if any(item.get("image_quality") in {"placeholder_only", "missing"} for item in candidate_source):
+        takeaways.append("推荐候选缺少真实图片，最终判断前必须补图或看房。")
+    if candidate_source:
+        cheapest = min(
+            (item for item in candidate_source if item.get("monthly_price_value") is not None),
+            key=lambda item: item["monthly_price_value"],
+            default=None,
+        )
+        if cheapest:
+            takeaways.append(f"{cheapest['title']} 更便宜，但仍要结合图片和缺失字段一起看。")
+    return takeaways[:4] or ["当前推荐基于价格、位置和信息完整度做了横向比较。"]
+
+
+def _build_why_these_listings(
+    *,
+    recommended_listings: list[dict],
+    watchlist_candidates: list[dict],
+    decision_mode: str,
+) -> str:
+    candidate_source = recommended_listings if decision_mode == "recommend" else watchlist_candidates
+    if not candidate_source:
+        return "这轮没有足够可信的候选，所以没有直接推荐。"
+    reason_bits = []
+    first = candidate_source[0]
+    if first.get("recommendation_reason_short"):
+        reason_bits.append(first["recommendation_reason_short"])
+    elif first.get("decision_reason"):
+        reason_bits.append(first["decision_reason"])
+    if len(candidate_source) >= 2:
+        reason_bits.append("我保留了少量更贴近硬条件的候选，避免把噪音结果一起推给用户。")
+    return "；".join(reason_bits[:2]) or "这些候选是在当前样本里相对更贴近目标条件的。"
+
+
+def _build_why_not_more(*, decision_mode: str, excluded_summary: dict[str, int]) -> str:
+    reasons = []
+    if excluded_summary["off_target_location_count"]:
+        reasons.append(f"{excluded_summary['off_target_location_count']} 条位置跑偏")
+    if excluded_summary["wrong_bedroom_count"]:
+        reasons.append(f"{excluded_summary['wrong_bedroom_count']} 条不满足卧室数")
+    if excluded_summary["wrong_rent_or_sale_count"]:
+        reasons.append(f"{excluded_summary['wrong_rent_or_sale_count']} 条买卖意图不符")
+    if excluded_summary["suspicious_count"]:
+        reasons.append(f"{excluded_summary['suspicious_count']} 条价格或房源类型异常")
+    if decision_mode == "recommend":
+        return "；".join(reasons[:3]) or "其余候选没有达到当前推荐标准。"
+    return "；".join(reasons[:3]) or "这轮其余候选更适合作为样本参考，而不是直接推荐。"
+
+
+def _build_image_and_link_summary(candidate_source: list[dict]) -> list[str]:
+    summary = []
+    for item in candidate_source[:2]:
+        if item.get("url"):
+            image_note = item.get("image_note") or "当前图片状态未知"
+            summary.append(f"{item['title']}：详情链接可用；{image_note}")
+    return summary
+
+
+def _build_must_show_findings(
+    *,
+    candidate_source: list[dict],
+    sample_basis_short: str,
+    sample_size_level: str,
+    compare_takeaways_short: list[str],
+) -> list[str]:
+    findings = [sample_basis_short]
+    findings.extend(compare_takeaways_short[:2])
+    if sample_size_level == "small":
+        findings.append("当前平台有效样本偏少，这轮结论只能算中等可信。")
+    same_location = {
+        _clean_location_text(item.get("location_text"))
+        for item in candidate_source
+        if item.get("location_text")
+    }
+    if len(same_location) == 1 and len(candidate_source) >= 2:
+        findings.append("两套候选都在同一位置，更像同一类学生公寓或同楼库存。")
+    return list(dict.fromkeys(findings))[:5]
+
+
+def _build_recommendation_cards_compact(candidate_source: list[dict]) -> list[dict]:
+    cards = []
+    for item in candidate_source[:2]:
+        cards.append(
+            {
+                "title": item["title"],
+                "price_brief": _build_price_brief(item),
+                "location_brief": _clean_location_text(item.get("location_text")),
+                "recommendation_reason_short": _build_recommendation_reason_short(item),
+                "top_risks": item.get("risk_summary_short") or _build_risk_summary_short(item),
+                "url": item.get("url"),
+                "primary_image_url": item.get("primary_image_url"),
+                "image_note": item.get("image_note"),
+            }
+        )
+    return cards
+
+
+def _build_render_ready_summary(
+    *,
+    decision_brief: dict[str, object],
+    must_show_findings: list[str],
+) -> str:
+    lines = [
+        f"结论：{decision_brief['final_verdict']}",
+        f"可信度：{decision_brief['confidence_label']}",
+        f"样本基数：{decision_brief['sample_basis_short']}",
+    ]
+    if must_show_findings:
+        lines.append("关键提醒：" + "；".join(must_show_findings[:3]))
+    return "\n".join(lines)
+
+
+def _build_price_brief(item: dict) -> str:
+    price_text = item.get("price_text") or "价格待确认"
+    if item.get("monthly_price_value") and item.get("rent_or_sale") == "rent":
+        return f"{price_text}（约 {item['monthly_price_value']:.0f}/月）"
+    return price_text
+
+
+def _build_recommendation_reason_short(item: dict) -> str:
+    if item.get("compared_advantages"):
+        return "；".join(item["compared_advantages"][:2])
+    reason = item.get("decision_reason") or item.get("recommendation_reason") or "当前样本里相对更贴近目标条件"
+    return reason
+
+
+def _build_risk_summary_short(item: dict) -> list[str]:
+    risks = []
+    if item.get("price_is_estimated_monthly"):
+        risks.append("价格来自周租/日租折算")
+    if item.get("image_quality") in {"placeholder_only", "missing"}:
+        risks.append("缺少真实图片")
+    missing_fields = item.get("missing_fields") or []
+    if "bathrooms" in missing_fields:
+        risks.append("卫生间信息未知")
+    if "pet_policy" in missing_fields:
+        risks.append("宠物政策未知")
+    if item.get("price_warning_cn"):
+        risks.append(item["price_warning_cn"])
+    return list(dict.fromkeys(risks))[:3]
+
+
+def _clean_location_text(value: str | None) -> str | None:
+    if not value:
+        return value
+    return value.replace("Show map", "").strip()
+
+
+def _translate_price_warning(item: dict) -> str | None:
+    if not item.get("price_analysis", {}).get("price_warning"):
+        return None
+    if item.get("price_is_estimated_monthly"):
+        return "这条价格是按周租或日租折算月租，只能作为参考，必须联系房东确认实际月租。"
+    if item.get("price_analysis", {}).get("is_trustworthy_price") is False:
+        return "这条价格可信度不足，不能直接和标准挂牌价一对一比较。"
+    return "这条价格需要进一步确认，暂时不适合直接作为最终判断依据。"
+
+
 def _build_analysis_sections(
     *,
     decision_mode: str,
@@ -1147,7 +1413,7 @@ def _build_user_facing_response(
                 price_line += f"（按月口径约 {item['monthly_price_value']:.0f}）"
             lines.append(f"价格：{price_line}")
             if item.get("location_text"):
-                lines.append(f"位置：{item['location_text']}")
+                lines.append(f"位置：{_clean_location_text(item['location_text'])}")
             if item.get("primary_image_url"):
                 lines.append(f"图片：{item['primary_image_url']}")
             if item.get("image_note"):
@@ -1174,8 +1440,8 @@ def _build_user_facing_response(
                 lines.append("字段说明：" + "；".join(parts))
             if item.get("must_confirm_questions"):
                 lines.append("看房前优先确认：" + "；".join(item["must_confirm_questions"][:2]))
-            if item.get("price_analysis", {}).get("price_warning"):
-                lines.append("价格提醒：" + item["price_analysis"]["price_warning"])
+            if item.get("price_warning_cn"):
+                lines.append("价格提醒：" + item["price_warning_cn"])
             lines.append(f"更适合谁：{item['suitable_for']}")
             lines.append(f"不太适合谁：{item['not_suitable_for']}")
             if item.get("url"):
@@ -1190,12 +1456,13 @@ def _build_user_facing_response(
     comparison_takeaways = compare_matrix.get("comparison_takeaways") or []
     if comparison_takeaways:
         lines.append("这轮主要比较了什么：" + "；".join(comparison_takeaways))
-    sample_basis = compare_matrix.get("sample_basis")
-    if sample_basis:
-        if "100 条" in sample_basis or "60 条" in sample_basis or "40 条" in sample_basis or "20 条" in sample_basis:
-            lines.append("样本说明：这轮结论基于较大样本池，不是只看前几条结果得出的。")
-        else:
-            lines.append("样本说明：虽然我扩大了搜索范围，但平台当前有效样本仍然有限。")
+    sample_size_level = compare_matrix.get("sample_size_level")
+    if sample_size_level == "large":
+        lines.append("样本说明：这轮结论基于较大样本池，不是只看前几条结果得出的。")
+    elif sample_size_level == "medium":
+        lines.append("样本说明：这轮结论基于中等样本池，方向可参考，但仍建议继续核实。")
+    else:
+        lines.append("样本说明：虽然我扩大了搜索范围，但平台当前有效样本仍然有限。")
     if decision_mode != "recommend":
         lines.append("为什么这次不直接推荐：" + analysis_sections["why_not_direct_recommendation"])
     else:
@@ -1407,6 +1674,7 @@ def _build_search_warnings(
     nyc_area_mode: str,
     excluded_outlier_count: int,
     used_near_filter: bool,
+    requested_max_results: int,
 ) -> list[str]:
     warnings = []
     if used_near_filter and target_point is None:
@@ -1419,6 +1687,8 @@ def _build_search_warnings(
         warnings.append("NYC searches prioritize core borough relevance over nearby out-of-area listings.")
     if excluded_outlier_count:
         warnings.append(f"Excluded {excluded_outlier_count} suspiciously low-priced listing(s).")
+    if requested_max_results < 100:
+        warnings.append("当前样本量低于推荐分析默认值 100，结论可信度会下降。")
     return warnings
 
 

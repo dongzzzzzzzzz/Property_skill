@@ -61,6 +61,19 @@ NYC_AREA_KEYWORDS = {
     "staten island": ["staten island"],
 }
 NYC_CORE_AREAS = {"manhattan", "brooklyn", "queens", "bronx", "staten island", "long island city"}
+NYC_CONTEXT_KEYWORDS = [
+    "new york",
+    "nyc",
+    "jersey city",
+    "new jersey",
+    "brooklyn",
+    "queens",
+    "bronx",
+    "staten island",
+    "long island city",
+    "lic",
+    "hoboken",
+]
 SUSPICIOUS_RENTAL_KEYWORDS = [
     "short-term",
     "short term",
@@ -256,19 +269,28 @@ def looks_like_placeholder_price(price_text: str | None) -> bool:
 
 
 def classify_nyc_area(title: str, location_text: str | None, description: str | None) -> tuple[str | None, str | None, str | None]:
-    text = _compact_text(location_text, title, description).lower()
-    if not text:
+    location_title_text = _compact_text(location_text, title).lower()
+    description_text = (description or "").lower()
+    full_text = _compact_text(location_text, title, description).lower()
+    if not full_text:
         return None, None, None
-    if "new york" not in text and "manhattan" not in text and "brooklyn" not in text and "queens" not in text and "bronx" not in text and "staten island" not in text and "jersey city" not in text and "hoboken" not in text and "newport" not in text and "long island city" not in text and "lic" not in text:
+
+    location_title_context = any(
+        token in location_title_text
+        for token in NYC_CONTEXT_KEYWORDS + ["manhattan"]
+    )
+    description_context = any(token in description_text for token in NYC_CONTEXT_KEYWORDS)
+    if not location_title_context and not description_context:
         return None, None, None
 
     matched_area = None
     matched_length = -1
-    for area_name, keywords in NYC_AREA_KEYWORDS.items():
-        for keyword in keywords:
-            if keyword in text and len(keyword) > matched_length:
-                matched_area = area_name
-                matched_length = len(keyword)
+    for haystack in [location_title_text, description_text if (location_title_context or description_context) else ""]:
+        for area_name, keywords in NYC_AREA_KEYWORDS.items():
+            for keyword in keywords:
+                if keyword in haystack and len(keyword) > matched_length:
+                    matched_area = area_name
+                    matched_length = len(keyword)
 
     if matched_area is None:
         return "nyc", None, None

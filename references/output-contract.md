@@ -8,6 +8,14 @@
   - `recommend`：可以展示“推荐结果”
   - `watchlist`：只能展示“可参考观察项”
   - `explain_only`：只能展示“结果说明/样本分析”
+- `render_ready_summary`
+- `decision_brief`
+- `must_show_findings`
+- `recommendation_cards_compact`
+- `why_these_listings`
+- `why_not_more`
+- `sample_basis_short`
+- `image_and_link_summary`
 - `result_judgement`
 - `query_fit_summary`
 - `compare_matrix`
@@ -41,6 +49,7 @@
 
 ## 硬规则
 
+- 找房时优先调用 `python scripts/run_property_c_search.py ...`，不要直接调用 `ok-core-skill search/browse-category`。
 - 不要把 `listings` 原样平铺给用户。
 - 不要根据 `score` 自己生成“首选/Top1/星级”。
 - 缺失字段必须显式展示，`unknown` 只能解释成“当前页面没有足够信息支持判断”。
@@ -48,3 +57,5 @@
 - `field_sources` 和 `decision_mode` 是上层消费的硬约束，不得忽略。
 - `url` 和 `primary_image_url` 是候选卡片主字段，不得省略。
 - 即使 `decision_mode != recommend`，也不能把图片/链接从卡片里拿掉。
+- `recommendation_cards_compact` 是上层首选展示源，`must_show_findings` 至少展示 2 条。
+- `decision_brief.final_verdict` 和 `sample_basis_short` 不得省略。

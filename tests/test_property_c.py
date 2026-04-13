@@ -273,6 +273,54 @@ class RecordingConnector:
         )
 
 
+class MelbourneConnector:
+    def search_property(self, **_kwargs):
+        return [
+            SourceListing(
+                provider="ok",
+                title="1 Bedroom Apartment Australia 108, Melbourne",
+                price_text="A$186 per week",
+                location_text="70 Southbank Blvd, Southbank VIC 3006, AustraliaShow map",
+                url="mel-1",
+            ),
+            SourceListing(
+                provider="ok",
+                title="1 Bedroom Apartment Sky High Australia 108, Melbourne",
+                price_text="A$221 per week",
+                location_text="70 Southbank Blvd, Southbank VIC 3006, AustraliaShow map",
+                url="mel-2",
+            ),
+        ]
+
+    def browse_property(self, **_kwargs):
+        return self.search_property()
+
+    def get_listing_detail(self, *, url: str):
+        mapping = {
+            "mel-1": SourceListing(
+                provider="ok",
+                title="1 Bedroom Apartment Australia 108, Melbourne",
+                price_text="A$186 per week",
+                location_text="70 Southbank Blvd, Southbank VIC 3006, AustraliaShow map",
+                url=url,
+                description="Manhattan style student apartment in Southbank with parking.",
+                image_urls=["https://sgj1.ok.com/yongjia/_next/static/media/cardDefault.8ee8f7d6.png"],
+                detail_fetched=True,
+            ),
+            "mel-2": SourceListing(
+                provider="ok",
+                title="1 Bedroom Apartment Sky High Australia 108, Melbourne",
+                price_text="A$221 per week",
+                location_text="70 Southbank Blvd, Southbank VIC 3006, AustraliaShow map",
+                url=url,
+                description="Sky high weekly rental apartment in Southbank with parking.",
+                image_urls=[],
+                detail_fetched=True,
+            ),
+        }
+        return mapping[url]
+
+
 class PropertyCWorkflowTests(unittest.TestCase):
     def test_price_period_normalization(self) -> None:
         value, currency, period, monthly, estimated = parse_price("$100 Daily", "short-term apartment")
@@ -525,6 +573,51 @@ class PropertyCWorkflowTests(unittest.TestCase):
         self.assertIn("本轮共扫描 100 条平台样本，其中 40 条进入详情分析", payload["summary"]["confidence_basis"])
         self.assertIn("本轮共扫描 100 条平台样本，其中 40 条进入详情分析", payload["decision_summary"])
         self.assertIn("较大样本池", payload["user_facing_response"])
+
+    def test_small_sample_size_warns_and_surfaces_compact_outputs(self) -> None:
+        payload = search_properties(
+            MelbourneConnector(),
+            keyword="1 bedroom apartment",
+            country="australia",
+            city="melbourne",
+            rent_or_sale="rent",
+            max_results=20,
+            detail_limit=20,
+        )
+        self.assertEqual(payload["property_skill_requested_max_results"], 20)
+        self.assertEqual(payload["effective_candidate_pool_size"], 2)
+        self.assertIn("当前样本量低于推荐分析默认值 100", " ".join(payload["warnings"]))
+        self.assertIn("render_ready_summary", payload)
+        self.assertIn("decision_brief", payload)
+        self.assertIn("must_show_findings", payload)
+        self.assertIn("recommendation_cards_compact", payload)
+        self.assertGreaterEqual(len(payload["must_show_findings"]), 2)
+        compact = payload["recommendation_cards_compact"][0]
+        self.assertIn("url", compact)
+        self.assertIn("primary_image_url", compact)
+        self.assertIn("样本仍有限", payload["sample_basis_short"])
+        self.assertIn("平台当前有效样本仍然有限", payload["user_facing_response"])
+
+    def test_non_nyc_search_does_not_leak_manhattan_area_label(self) -> None:
+        payload = search_properties(
+            MelbourneConnector(),
+            keyword="1 bedroom apartment",
+            country="australia",
+            city="melbourne",
+            area="southbank",
+            rent_or_sale="rent",
+            max_results=20,
+            detail_limit=20,
+        )
+        combined = "\n".join(
+            [
+                payload["user_facing_response"],
+                *(item["fit_for_user"] for item in payload["recommended_listings"]),
+                *(item["location_brief"] or "" for item in payload["recommendation_cards_compact"]),
+            ]
+        ).lower()
+        self.assertNotIn("manhattan", combined)
+        self.assertIn("southbank", combined)
 
 
 if __name__ == "__main__":
