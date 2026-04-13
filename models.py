@@ -58,6 +58,8 @@ class NormalizedListing:
     metro_area: str | None = None
     sub_area: str | None = None
     borough: str | None = None
+    area_size_value: float | None = None
+    area_size_unit: str | None = None
     features: list[str] = field(default_factory=list)
     description: str | None = None
     image_urls: list[str] = field(default_factory=list)
@@ -68,6 +70,12 @@ class NormalizedListing:
     warnings: list[str] = field(default_factory=list)
     location_relevance: dict[str, Any] = field(default_factory=dict)
     price_anomaly: dict[str, Any] = field(default_factory=dict)
+    price_analysis: dict[str, Any] = field(default_factory=dict)
+    image_quality: str = "missing"
+    field_status: dict[str, str] = field(default_factory=dict)
+    field_sources: dict[str, dict[str, Any]] = field(default_factory=dict)
+    known_fields: list[str] = field(default_factory=list)
+    missing_fields: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

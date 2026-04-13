@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 
 from models import SourceListing
-from helpers import area_match_level, classify_nyc_area, infer_rent_or_sale, parse_price
+from helpers import area_match_level, classify_nyc_area, infer_rent_or_sale, normalize_listing, parse_price
+from workflows.common import build_viewing_questions
 from workflows.property_c import compare_properties, estimate_total_cost, search_properties
 
 
@@ -262,6 +263,8 @@ class PropertyCWorkflowTests(unittest.TestCase):
         payload = compare_properties(FakeConnector(), urls=["u1", "u2"])
         self.assertEqual(payload["recommended_listing_id"], payload["comparison"][0]["canonical_id"])
         self.assertEqual(len(payload["comparison"]), 2)
+        self.assertIn("compare_matrix", payload)
+        self.assertTrue(payload["compare_matrix"]["comparison_takeaways"])
 
     def test_estimate_total_cost_for_rent(self) -> None:
         payload = estimate_total_cost(
@@ -406,6 +409,57 @@ class PropertyCWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(len(payload["watchlist_candidates"]), 1)
         self.assertIn("Queens/LIC", payload["result_judgement"])
         self.assertIn("不直接推荐", payload["user_facing_response"])
+
+    def test_search_surfaces_field_status_and_compare_matrix(self) -> None:
+        payload = search_properties(
+            FakeConnector(),
+            keyword="apartment",
+            country="singapore",
+            city="singapore",
+            max_results=2,
+            detail_limit=2,
+        )
+        candidate = payload["recommended_listings"][0]
+        self.assertEqual(candidate["field_status"]["bathrooms"], "unknown")
+        self.assertIn("bathrooms", candidate["missing_fields"])
+        self.assertIn("field_source_summary", candidate)
+        self.assertIn("compare_matrix", payload)
+        row_labels = [row["label"] for row in payload["compare_matrix"]["rows"]]
+        self.assertIn("卫生间", row_labels)
+        self.assertIn("关键缺失字段", row_labels)
+
+    def test_placeholder_image_is_treated_as_unknown_visual_signal(self) -> None:
+        listing = normalize_listing(
+            SourceListing(
+                provider="ok",
+                title="2BR Apartment",
+                price_text="SGD 3000/month",
+                location_text="Bedok, Singapore",
+                description="2 bedroom apartment with parking.",
+                image_urls=["https://sgj1.ok.com/yongjia/_next/static/media/cardDefault.8ee8f7d6.png"],
+            )
+        )
+        self.assertEqual(listing.image_quality, "placeholder_only")
+        self.assertEqual(listing.field_status["images"], "unknown")
+
+    def test_viewing_questions_follow_missing_fields_and_risks(self) -> None:
+        listing = normalize_listing(
+            SourceListing(
+                provider="ok",
+                title="Studio Apartment",
+                price_text="$100 Daily",
+                location_text="Jersey City, NJ",
+                description="Short-term studio near PATH.",
+                image_urls=["https://sgj1.ok.com/yongjia/_next/static/media/cardDefault.8ee8f7d6.png"],
+            )
+        )
+        listing.price_anomaly = {"is_suspicious_low": True, "reason": "Price is far below peers.", "severity": "high"}
+        listing.price_analysis["is_trustworthy_price"] = False
+        questions = build_viewing_questions(listing)
+        self.assertTrue(any("1 卫还是 2 卫" in question for question in questions["must_confirm_questions"]))
+        self.assertTrue(any("车位" in question for question in questions["must_confirm_questions"]))
+        self.assertTrue(any("宠物" in question for question in questions["must_confirm_questions"]))
+        self.assertTrue(any("真实室内照片" in question for question in questions["risk_questions"]))
 
 
 if __name__ == "__main__":

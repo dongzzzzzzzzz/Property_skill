@@ -7,12 +7,15 @@ from geo import NominatimGeocoder, SchoolFinder, estimate_eta_minutes, haversine
 from helpers import area_match_level, normalize_feature_input
 from workflows.common import (
     add_match_reasons,
+    build_compare_matrix,
+    build_field_source_summary,
     build_query_from_inputs,
     build_viewing_questions,
     filter_listings,
     hydrate_and_normalize,
     listing_price_summary,
     score_listing,
+    summarize_field_coverage,
 )
 
 
@@ -135,6 +138,7 @@ def search_properties(
         listing_payload = listing.to_dict()
         listing_payload["scores"] = scores
         listing_payload.update(extra)
+        listing_payload["field_source_summary"] = build_field_source_summary(listing)
         if target_point and listing.lat is not None and listing.lng is not None:
             listing_payload["distance_km"] = round(
                 haversine_km(target_point[0], target_point[1], listing.lat, listing.lng), 2
@@ -203,6 +207,9 @@ def search_properties(
         keyword=keyword,
         budget_max=budget_max,
     )
+    candidate_source = recommended_listings if decision_context["decision_mode"] == "recommend" else watchlist_candidates
+    compare_matrix = build_compare_matrix(candidate_source[:3]) if candidate_source else build_compare_matrix(enriched[:3])
+    field_coverage = summarize_field_coverage(candidate_source[:3]) if candidate_source else summarize_field_coverage(enriched[:3])
     decision_summary = _build_decision_summary(
         decision_mode=decision_context["decision_mode"],
         result_quality=result_quality,
@@ -228,6 +235,8 @@ def search_properties(
         excluded_summary=excluded_summary,
         next_step_suggestion=next_step_suggestion,
     )
+    analysis_sections["comparison_takeaways"] = compare_matrix.get("comparison_takeaways", [])
+    analysis_sections["field_coverage"] = field_coverage
     user_facing_response = _build_user_facing_response(
         decision_mode=decision_context["decision_mode"],
         result_judgement=decision_context["result_judgement"],
@@ -238,6 +247,7 @@ def search_properties(
         excluded_summary=excluded_summary,
         result_quality=result_quality,
         analysis_sections=analysis_sections,
+        compare_matrix=compare_matrix,
         next_step_suggestion=next_step_suggestion,
     )
     return {
@@ -267,7 +277,11 @@ def search_properties(
             "excluded_outlier_count": excluded_outlier_count,
             "area_distribution": area_distribution,
         },
+        "field_status": field_coverage["field_status"],
+        "known_fields": field_coverage["known_fields"],
+        "missing_fields": field_coverage["missing_fields"],
         "listings": enriched,
+        "compare_matrix": compare_matrix,
         "result_quality": result_quality,
         "decision_mode": decision_context["decision_mode"],
         "result_judgement": decision_context["result_judgement"],
@@ -509,7 +523,7 @@ def _evaluate_strict_match(
     if suspicious:
         tradeoffs.append(listing.price_anomaly.get("reason") or "价格或房源类型存在异常")
 
-    if not listing.image_urls:
+    if listing.image_quality in {"placeholder_only", "missing"}:
         tradeoffs.append("图片较少或缺失")
     if not listing.description:
         tradeoffs.append("描述信息不完整")
@@ -666,6 +680,7 @@ def _build_output_candidates(
                     item,
                     decision_mode=decision_mode,
                     strict_candidates=strict_candidates,
+                    comparison_pool=selected,
                     index=index,
                     city=city,
                     area=area,
@@ -683,6 +698,7 @@ def _build_output_candidates(
             item,
             decision_mode=decision_mode,
             strict_candidates=strict_candidates,
+            comparison_pool=pool,
             index=index,
             city=city,
             area=area,
@@ -699,6 +715,7 @@ def _build_candidate_card(
     *,
     decision_mode: str,
     strict_candidates: list[dict],
+    comparison_pool: list[dict],
     index: int,
     city: str,
     area: str | None,
@@ -709,6 +726,7 @@ def _build_candidate_card(
     tradeoffs = item.get("tradeoffs") or []
     suitable_for, not_suitable_for = _infer_audience_fit(item, city=city, area=area, keyword=keyword, budget_max=budget_max)
     decision_tag = _decision_tag_for_item(item, decision_mode)
+    compared_advantages, compared_disadvantages = _compare_candidate_against_pool(item, comparison_pool)
     why_not_ideal = "；".join(tradeoffs) if tradeoffs else _fallback_why_not_ideal(item, decision_mode, city=city)
     if decision_mode == "recommend":
         decision_reason = _compose_recommendation_reason(item, strict_candidates, index)
@@ -716,6 +734,8 @@ def _build_candidate_card(
         decision_reason = _compose_watchlist_reason(item, strict_candidates, index)
     else:
         decision_reason = _compose_explain_reason(item, city=city)
+    field_source_summary = build_field_source_summary(item)
+    question_bundle = build_viewing_questions(item, comparison_pool=comparison_pool)
 
     return {
         "canonical_id": item["canonical_id"],
@@ -734,7 +754,18 @@ def _build_candidate_card(
         "suitable_for": suitable_for,
         "not_suitable_for": not_suitable_for,
         "decision_tag": decision_tag,
+        "field_status": item.get("field_status", {}),
+        "field_sources": item.get("field_sources", {}),
+        "known_fields": item.get("known_fields", []),
+        "missing_fields": item.get("missing_fields", []),
+        "field_source_summary": field_source_summary,
+        "image_quality": item.get("image_quality"),
+        "price_analysis": item.get("price_analysis", {}),
+        "compared_advantages": compared_advantages,
+        "compared_disadvantages": compared_disadvantages,
+        "key_missing_fields": item.get("missing_fields", []),
         "why_recommended": item.get("why_recommended"),
+        **question_bundle,
         "scores": item.get("scores", {}),
     }
 
@@ -748,6 +779,9 @@ def _decision_tag_for_item(item: dict, decision_mode: str) -> str:
 
 
 def _fallback_why_not_ideal(item: dict, decision_mode: str, *, city: str) -> str:
+    missing_fields = item.get("missing_fields") or []
+    if missing_fields:
+        return "当前仍有这些关键信息待确认：" + "、".join(missing_fields[:4])
     if decision_mode == "explain_only" and (city or "").lower() in {"new-york", "new york"}:
         return "它本身不一定有明显问题，但所在区域更像替代选项，不足以代表你真正想看的纽约核心区选择。"
     if decision_mode == "watchlist":
@@ -839,6 +873,59 @@ def _infer_audience_fit(
     return suitable_text, unsuitable_text
 
 
+def _compare_candidate_against_pool(item: dict, comparison_pool: list[dict]) -> tuple[list[str], list[str]]:
+    if not comparison_pool:
+        return [], []
+
+    advantages = []
+    disadvantages = []
+    prices = [candidate.get("monthly_price_value") for candidate in comparison_pool if candidate.get("monthly_price_value") is not None]
+    completeness_scores = [
+        candidate.get("scores", {}).get("completeness_score", 0)
+        for candidate in comparison_pool
+    ]
+    location_scores = [
+        candidate.get("scores", {}).get("location_relevance_score", 0)
+        for candidate in comparison_pool
+    ]
+
+    item_price = item.get("monthly_price_value")
+    if item_price is not None and prices:
+        if item_price == min(prices):
+            advantages.append("在当前候选里价格更低")
+        elif item_price == max(prices) and len(prices) > 1:
+            disadvantages.append("在当前候选里价格更高")
+
+    completeness = item.get("scores", {}).get("completeness_score", 0)
+    if completeness_scores:
+        if completeness == max(completeness_scores):
+            advantages.append("已知信息相对更完整")
+        elif completeness == min(completeness_scores) and len(completeness_scores) > 1:
+            disadvantages.append("关键字段缺失相对更多")
+
+    location_score = item.get("scores", {}).get("location_relevance_score", 0)
+    if location_scores:
+        if location_score == max(location_scores):
+            advantages.append("位置更接近这次搜索目标")
+        elif location_score == min(location_scores) and len(location_scores) > 1:
+            disadvantages.append("位置不如其他候选贴近目标区域")
+
+    if item.get("image_quality") == "real_images":
+        advantages.append("至少提供了可用实拍图")
+    elif item.get("image_quality") in {"placeholder_only", "missing"}:
+        disadvantages.append("当前只有占位图或没有实拍图")
+
+    if item.get("missing_fields"):
+        if "bathrooms" in item["missing_fields"]:
+            disadvantages.append("卫生间信息仍未知")
+        if "parking" in item["missing_fields"]:
+            disadvantages.append("停车信息仍未知")
+        if "pet_policy" in item["missing_fields"]:
+            disadvantages.append("宠物政策仍未知")
+
+    return list(dict.fromkeys(advantages))[:3], list(dict.fromkeys(disadvantages))[:3]
+
+
 def _build_decision_summary(
     *,
     decision_mode: str,
@@ -900,6 +987,9 @@ def _build_analysis_sections(
             "decision_reason": item["decision_reason"],
             "fit_for_user": item["fit_for_user"],
             "why_not_ideal": item["why_not_ideal"],
+            "compared_advantages": item.get("compared_advantages", []),
+            "compared_disadvantages": item.get("compared_disadvantages", []),
+            "missing_fields": item.get("missing_fields", []),
         }
         for item in candidate_source
     ]
@@ -934,6 +1024,7 @@ def _build_user_facing_response(
     excluded_summary: dict[str, int],
     result_quality: dict[str, object],
     analysis_sections: dict[str, object],
+    compare_matrix: dict[str, object],
     next_step_suggestion: list[str],
 ) -> str:
     lines = [
@@ -956,6 +1047,29 @@ def _build_user_facing_response(
             lines.append("为什么它贴合这次搜索：" + item["fit_for_user"])
             lines.append("为什么它又不是最理想选择：" + item["why_not_ideal"])
             lines.append("这次怎么处理它：" + item["decision_reason"])
+            if item.get("compared_advantages"):
+                lines.append("和其他候选相比的优势：" + "；".join(item["compared_advantages"]))
+            if item.get("compared_disadvantages"):
+                lines.append("和其他候选相比的短板：" + "；".join(item["compared_disadvantages"]))
+            source_summary = item.get("field_source_summary") or {}
+            explicit_fields = "、".join(source_summary.get("explicit_fields") or [])
+            inferred_fields = "、".join(source_summary.get("inferred_fields") or [])
+            unknown_fields = "、".join(source_summary.get("unknown_fields") or [])
+            if explicit_fields or inferred_fields or unknown_fields:
+                parts = []
+                if explicit_fields:
+                    parts.append(f"页面明确给出的信息：{explicit_fields}")
+                if inferred_fields:
+                    parts.append(f"根据标题/描述推断的信息：{inferred_fields}")
+                if unknown_fields:
+                    parts.append(f"当前仍未知的信息：{unknown_fields}")
+                lines.append("字段说明：" + "；".join(parts))
+            if item.get("must_confirm_questions"):
+                lines.append("看房前优先确认：" + "；".join(item["must_confirm_questions"][:2]))
+            if item.get("price_analysis", {}).get("price_warning"):
+                lines.append("价格提醒：" + item["price_analysis"]["price_warning"])
+            if item.get("image_quality") == "placeholder_only":
+                lines.append("图片提醒：当前只有占位图，无法据此判断真实房屋情况。")
             lines.append(f"更适合谁：{item['suitable_for']}")
             lines.append(f"不太适合谁：{item['not_suitable_for']}")
             if item.get("url"):
@@ -967,6 +1081,9 @@ def _build_user_facing_response(
         lines.append("候选分析：当前没有足够可信的候选可供展开。")
 
     lines.append("")
+    comparison_takeaways = compare_matrix.get("comparison_takeaways") or []
+    if comparison_takeaways:
+        lines.append("这轮主要比较了什么：" + "；".join(comparison_takeaways))
     if decision_mode != "recommend":
         lines.append("为什么这次不直接推荐：" + analysis_sections["why_not_direct_recommendation"])
     else:
@@ -990,20 +1107,30 @@ def compare_properties(
     compared = []
     for listing in normalized:
         scores = score_listing(listing, peer_group)
+        question_bundle = build_viewing_questions(listing, comparison_pool=peer_group)
         compared.append(
             {
                 **listing.to_dict(),
                 "scores": scores,
-                **build_viewing_questions(listing),
+                **question_bundle,
+                "field_source_summary": build_field_source_summary(listing),
             }
         )
     compared.sort(key=lambda item: item["scores"]["total_score"], reverse=True)
     recommendation = compared[0]["canonical_id"] if compared else None
+    compare_matrix = build_compare_matrix(compared)
+    field_coverage = summarize_field_coverage(compared)
     return {
         "input": {"urls": urls},
         "comparison": compared,
+        "compare_matrix": compare_matrix,
+        "field_status": field_coverage["field_status"],
+        "known_fields": field_coverage["known_fields"],
+        "missing_fields": field_coverage["missing_fields"],
         "recommended_listing_id": recommendation,
-        "recommended_reason": "Best overall balance of price, completeness, and fit." if recommendation else None,
+        "recommended_reason": (
+            "；".join(compare_matrix.get("comparison_takeaways") or []) if recommendation else None
+        ),
         "warnings": [],
         "confidence": _confidence_from_results(compared),
     }
@@ -1067,9 +1194,19 @@ def score_value(
             detail_limit=len(comparable_urls),
         )
     scores = score_listing(subject, peers)
+    compare_candidates = [subject] + [peer for peer in peers if peer.canonical_id != subject.canonical_id]
+    compare_matrix = build_compare_matrix(compare_candidates[:3])
     return {
-        "listing": subject.to_dict(),
+        "listing": {
+            **subject.to_dict(),
+            **build_viewing_questions(subject, comparison_pool=compare_candidates[:3]),
+            "field_source_summary": build_field_source_summary(subject),
+        },
         "scores": scores,
+        "compare_matrix": compare_matrix,
+        "field_status": subject.field_status,
+        "known_fields": subject.known_fields,
+        "missing_fields": subject.missing_fields,
         "warnings": [] if comparable_urls else ["Score is based on limited peer context."],
         "confidence": round(subject.parse_confidence, 2),
     }

@@ -4,7 +4,7 @@ import hashlib
 import math
 import re
 from statistics import median
-from typing import Iterable
+from typing import Any, Iterable
 
 from models import NormalizedListing, SourceListing
 
@@ -14,7 +14,12 @@ BED_PATTERNS = [
 BATH_PATTERNS = [
     re.compile(r"(\d+(?:\.\d+)?)\s*(?:bath|baths|bathroom|bathrooms)\b", re.I),
 ]
+AREA_PATTERNS = [
+    re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*ft|sqft|square feet)\b", re.I),
+    re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*m|sqm|m2|m²|square meters?)\b", re.I),
+]
 PRICE_PATTERN = re.compile(r"(?P<currency>[$€£AEDSGDUSDCA$AU$HK$MYR₹])?\s*(?P<number>\d[\d,]*(?:\.\d+)?)", re.I)
+PLACEHOLDER_PRICE_PATTERN = re.compile(r"[$€£]?\s*\d[\d,]*x{1,}\b", re.I)
 DAILY_PERIOD_PATTERN = re.compile(r"\b(daily|per day|/day|nightly|per night|/night)\b", re.I)
 WEEKLY_PERIOD_PATTERN = re.compile(r"\b(weekly|per week|/week)\b", re.I)
 MONTHLY_PERIOD_PATTERN = re.compile(r"\b(monthly|per month|/month)\b", re.I)
@@ -37,6 +42,15 @@ PROPERTY_TYPES = [
     "townhouse",
     "villa",
 ]
+PLACEHOLDER_IMAGE_MARKERS = [
+    "carddefault",
+    "placeholder",
+    "default-image",
+    "defaultimg",
+    "no-image",
+]
+PET_ALLOWED_KEYWORDS = ["pet friendly", "pets allowed", "pet allowed", "allow cat", "allow dog"]
+PET_BLOCKED_KEYWORDS = ["no pets", "pets not allowed", "pet not allowed"]
 NYC_AREA_KEYWORDS = {
     "long island city": ["long island city", "lic"],
     "jersey city": ["jersey city", "journal square", "newport", "hoboken", "new jersey"],
@@ -56,6 +70,17 @@ SUSPICIOUS_RENTAL_KEYWORDS = [
     "daily",
     "5 days",
     "6 days",
+]
+FIELD_NAMES = [
+    "price",
+    "price_period",
+    "location",
+    "bedrooms",
+    "bathrooms",
+    "area_size",
+    "parking",
+    "pet_policy",
+    "images",
 ]
 
 
@@ -96,6 +121,9 @@ def normalize_monthly_price(price_value: float | None, price_period: str) -> tup
 def parse_price(price_text: str | None, *context_texts: str | None) -> tuple[float | None, str | None, str, float | None, bool]:
     if not price_text:
         return None, None, "unknown", None, False
+    if PLACEHOLDER_PRICE_PATTERN.search(price_text):
+        currency_match = re.search(r"[$€£]", price_text)
+        return None, currency_match.group(0) if currency_match else None, "unknown", None, False
     matches = list(PRICE_PATTERN.finditer(price_text.replace("/month", "").replace("per month", "")))
     if not matches:
         return None, None, "unknown", None, False
@@ -136,22 +164,35 @@ def infer_property_type(title: str, description: str | None) -> str | None:
     return None
 
 
-def _extract_number(patterns: list[re.Pattern[str]], text: str) -> float | None:
+def _extract_number(patterns: list[re.Pattern[str]], text: str, *, studio_as_zero: bool = False) -> float | None:
     for pattern in patterns:
         match = pattern.search(text)
         if match:
             return float(match.group(1))
-    if "studio" in text.lower():
+    if studio_as_zero and "studio" in text.lower():
         return 0.0
     return None
 
 
 def infer_beds(title: str, description: str | None) -> float | None:
-    return _extract_number(BED_PATTERNS, _compact_text(title, description))
+    return _extract_number(BED_PATTERNS, _compact_text(title, description), studio_as_zero=True)
 
 
 def infer_baths(title: str, description: str | None) -> float | None:
     return _extract_number(BATH_PATTERNS, _compact_text(title, description))
+
+
+def infer_area_size(title: str, description: str | None) -> tuple[float | None, str | None]:
+    text = _compact_text(title, description)
+    for pattern in AREA_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        value = float(match.group(1).replace(",", ""))
+        matched_text = match.group(0).lower()
+        unit = "sqft" if any(token in matched_text for token in ["sqft", "sq ft", "square feet"]) else "sqm"
+        return value, unit
+    return None, None
 
 
 def extract_features(title: str, description: str | None) -> list[str]:
@@ -161,6 +202,35 @@ def extract_features(title: str, description: str | None) -> list[str]:
         if any(keyword in text for keyword in keywords):
             features.append(feature)
     return sorted(features)
+
+
+def classify_image_quality(image_urls: Iterable[str] | None) -> str:
+    urls = [url for url in (image_urls or []) if url]
+    if not urls:
+        return "missing"
+    placeholder_count = 0
+    for url in urls:
+        lowered = url.lower()
+        if any(marker in lowered for marker in PLACEHOLDER_IMAGE_MARKERS):
+            placeholder_count += 1
+    if placeholder_count == len(urls):
+        return "placeholder_only"
+    if placeholder_count:
+        return "mixed"
+    return "real_images"
+
+
+def infer_pet_policy(title: str, description: str | None) -> str | None:
+    text = _compact_text(title, description).lower()
+    if any(keyword in text for keyword in PET_BLOCKED_KEYWORDS):
+        return "pets not allowed"
+    if any(keyword in text for keyword in PET_ALLOWED_KEYWORDS):
+        return "pets allowed"
+    return None
+
+
+def looks_like_placeholder_price(price_text: str | None) -> bool:
+    return bool(price_text and PLACEHOLDER_PRICE_PATTERN.search(price_text))
 
 
 def classify_nyc_area(title: str, location_text: str | None, description: str | None) -> tuple[str | None, str | None, str | None]:
@@ -286,13 +356,170 @@ def detect_price_anomaly(
     }
 
 
+def _source_for_pattern(title: str, description: str | None, patterns: list[re.Pattern[str]]) -> str:
+    if any(pattern.search(title or "") for pattern in patterns):
+        return "listing_title"
+    if any(pattern.search(description or "") for pattern in patterns):
+        return "listing_description"
+    return "not_available"
+
+
+def _source_for_keywords(title: str, description: str | None, keywords: Iterable[str]) -> str:
+    lowered_title = (title or "").lower()
+    lowered_description = (description or "").lower()
+    if any(keyword in lowered_title for keyword in keywords):
+        return "listing_title"
+    if any(keyword in lowered_description for keyword in keywords):
+        return "listing_description"
+    return "not_available"
+
+
+def _field_entry(
+    *,
+    value: Any,
+    status: str,
+    source: str,
+    confidence: str,
+) -> dict[str, Any]:
+    return {
+        "value": value,
+        "status": status,
+        "source": source,
+        "confidence": confidence,
+    }
+
+
+def _build_field_metadata(
+    source: SourceListing,
+    *,
+    price_value: float | None,
+    price_period: str,
+    monthly_price_value: float | None,
+    price_is_estimated_monthly: bool,
+    beds: float | None,
+    baths: float | None,
+    area_size_value: float | None,
+    area_size_unit: str | None,
+    features: list[str],
+    image_quality: str,
+    pet_policy: str | None,
+) -> tuple[dict[str, str], dict[str, dict[str, Any]], list[str], list[str]]:
+    title = source.title or ""
+    description = source.description
+    parking_source = _source_for_keywords(title, description, FEATURE_KEYWORDS["parking"])
+    pet_source = (
+        _source_for_keywords(title, description, PET_BLOCKED_KEYWORDS)
+        if pet_policy == "pets not allowed"
+        else _source_for_keywords(title, description, PET_ALLOWED_KEYWORDS)
+    )
+    field_sources = {
+        "price": _field_entry(
+            value=monthly_price_value if monthly_price_value is not None else price_value,
+            status="present" if price_value is not None else "unknown",
+            source="price_text_normalization" if price_value is not None else "not_available",
+            confidence="medium_low" if price_is_estimated_monthly else "high" if price_value is not None else "none",
+        ),
+        "price_period": _field_entry(
+            value=price_period if price_period != "unknown" else None,
+            status="present" if price_period != "unknown" else "unknown",
+            source="price_text_normalization" if price_period != "unknown" else "not_available",
+            confidence="medium" if price_period != "unknown" else "none",
+        ),
+        "location": _field_entry(
+            value=source.location_text,
+            status="present" if source.location_text else "unknown",
+            source="location_text_match" if source.location_text else "not_available",
+            confidence="high" if source.location_text else "none",
+        ),
+        "bedrooms": _field_entry(
+            value=beds,
+            status="inferred" if beds is not None else "unknown",
+            source=_source_for_pattern(title, description, BED_PATTERNS) if beds is not None else "not_available",
+            confidence="medium" if beds is not None else "none",
+        ),
+        "bathrooms": _field_entry(
+            value=baths,
+            status="inferred" if baths is not None else "unknown",
+            source=_source_for_pattern(title, description, BATH_PATTERNS) if baths is not None else "not_available",
+            confidence="medium" if baths is not None else "none",
+        ),
+        "area_size": _field_entry(
+            value=f"{area_size_value:g} {area_size_unit}" if area_size_value is not None and area_size_unit else None,
+            status="inferred" if area_size_value is not None else "unknown",
+            source=_source_for_pattern(title, description, AREA_PATTERNS) if area_size_value is not None else "not_available",
+            confidence="medium" if area_size_value is not None else "none",
+        ),
+        "parking": _field_entry(
+            value="mentioned" if "parking" in features else None,
+            status="inferred" if "parking" in features else "unknown",
+            source=parking_source if "parking" in features else "not_available",
+            confidence="medium" if "parking" in features else "none",
+        ),
+        "pet_policy": _field_entry(
+            value=pet_policy,
+            status="inferred" if pet_policy else "unknown",
+            source=pet_source if pet_policy else "not_available",
+            confidence="medium" if pet_policy else "none",
+        ),
+        "images": _field_entry(
+            value={"count": len(source.image_urls), "quality": image_quality} if source.image_urls else None,
+            status="present" if image_quality in {"real_images", "mixed"} else "unknown",
+            source="detail_page_field" if source.image_urls else "not_available",
+            confidence="high" if image_quality == "real_images" else "medium" if image_quality == "mixed" else "none",
+        ),
+    }
+    field_status = {field: entry["status"] for field, entry in field_sources.items()}
+    known_fields = [field for field in FIELD_NAMES if field_status.get(field) != "unknown"]
+    missing_fields = [field for field in FIELD_NAMES if field_status.get(field) == "unknown"]
+    return field_status, field_sources, known_fields, missing_fields
+
+
+def build_price_analysis(listing: NormalizedListing) -> dict[str, Any]:
+    warnings: list[str] = []
+    confidence = "high"
+    trustworthy = True
+
+    if listing.price_is_estimated_monthly:
+        confidence = "medium_low"
+        warnings.append("This listing was normalized from a daily/weekly rate.")
+    elif listing.price_period == "unknown":
+        confidence = "medium"
+
+    if looks_like_placeholder_price(listing.price_text):
+        trustworthy = False
+        confidence = "none"
+        warnings.append("The listing uses a placeholder-style price and should not be compared as a real quote.")
+
+    anomaly_reason = listing.price_anomaly.get("reason")
+    if listing.price_anomaly.get("is_suspicious_low"):
+        trustworthy = False
+        confidence = "low" if confidence != "none" else confidence
+        if anomaly_reason:
+            warnings.append(anomaly_reason)
+
+    if listing.price_value is None:
+        trustworthy = False
+        confidence = "none"
+        warnings.append("The page does not provide a trustworthy numeric price.")
+
+    unique_warnings = list(dict.fromkeys(warnings))
+    return {
+        "is_trustworthy_price": trustworthy,
+        "price_confidence": confidence,
+        "price_warning": " ".join(unique_warnings) if unique_warnings else None,
+    }
+
+
 def normalize_listing(source: SourceListing) -> NormalizedListing:
     price_value, currency, price_period, monthly_price_value, price_is_estimated_monthly = parse_price(
         source.price_text, source.title, source.description
     )
     beds = infer_beds(source.title, source.description)
     baths = infer_baths(source.title, source.description)
+    area_size_value, area_size_unit = infer_area_size(source.title, source.description)
     features = extract_features(source.title, source.description)
+    image_quality = classify_image_quality(source.image_urls)
+    pet_policy = infer_pet_policy(source.title, source.description)
     canonical_id = build_canonical_id(source.provider, source.listing_id, source.url)
     metro_area, sub_area, borough = classify_nyc_area(source.title, source.location_text, source.description)
 
@@ -314,7 +541,22 @@ def normalize_listing(source: SourceListing) -> NormalizedListing:
     if source.location_text:
         area_name = source.location_text.split(",")[0].strip()
 
-    return NormalizedListing(
+    field_status, field_sources, known_fields, missing_fields = _build_field_metadata(
+        source,
+        price_value=price_value,
+        price_period=price_period,
+        monthly_price_value=monthly_price_value,
+        price_is_estimated_monthly=price_is_estimated_monthly,
+        beds=beds,
+        baths=baths,
+        area_size_value=area_size_value,
+        area_size_unit=area_size_unit,
+        features=features,
+        image_quality=image_quality,
+        pet_policy=pet_policy,
+    )
+
+    listing = NormalizedListing(
         provider=source.provider,
         provider_listing_id=source.listing_id or canonical_id.split(":", 1)[-1],
         canonical_id=canonical_id,
@@ -336,6 +578,8 @@ def normalize_listing(source: SourceListing) -> NormalizedListing:
         lng=_safe_float(lng),
         beds=beds,
         baths=baths,
+        area_size_value=area_size_value,
+        area_size_unit=area_size_unit,
         property_type=infer_property_type(source.title, source.description),
         features=features,
         description=source.description,
@@ -348,7 +592,14 @@ def normalize_listing(source: SourceListing) -> NormalizedListing:
             if price_is_estimated_monthly
             else []
         ),
+        image_quality=image_quality,
+        field_status=field_status,
+        field_sources=field_sources,
+        known_fields=known_fields,
+        missing_fields=missing_fields,
     )
+    listing.price_analysis = build_price_analysis(listing)
+    return listing
 
 
 def _safe_float(value: object) -> float | None:
@@ -396,7 +647,7 @@ def information_completeness(listing: NormalizedListing) -> float:
         bool(listing.price_value is not None),
         bool(listing.location_text),
         bool(listing.description),
-        bool(listing.image_urls),
+        bool(listing.image_quality in {"real_images", "mixed"}),
         bool(listing.beds is not None),
         bool(listing.property_type),
     ]
