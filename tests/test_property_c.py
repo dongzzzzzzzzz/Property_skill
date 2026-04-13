@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from models import SourceListing
-from helpers import area_match_level, classify_nyc_area, parse_price
+from helpers import area_match_level, classify_nyc_area, infer_rent_or_sale, parse_price
 from workflows.property_c import compare_properties, estimate_total_cost, search_properties
 
 
@@ -166,6 +166,70 @@ class NoisyNYCSaleConnector:
         return mapping[url]
 
 
+class SkewedNYCRentalConnector:
+    def search_property(self, **_kwargs):
+        return [
+            SourceListing(provider="ok", title="LIC Studio in Jackson Park", price_text="$2900 Monthly", location_text="Long Island City, Queens, New York, NY", url="rent1"),
+            SourceListing(provider="ok", title="LIC Studio with Gym", price_text="$3000 Monthly", location_text="Long Island City, Queens, New York, NY", url="rent2"),
+            SourceListing(provider="ok", title="LIC High Floor 1BR", price_text="$3500 Monthly", location_text="Long Island City, Queens, New York, NY", url="rent3"),
+            SourceListing(provider="ok", title="Elmhurst Furnished 4BR", price_text="$3520 Monthly", location_text="Elmhurst, Queens, New York, NY", url="rent4"),
+            SourceListing(provider="ok", title="Jersey City Short-term Room", price_text="$100 Daily", location_text="Jersey City, NJ", url="rent5"),
+        ]
+
+    def browse_property(self, **_kwargs):
+        return self.search_property()
+
+    def get_listing_detail(self, *, url: str):
+        mapping = {
+            "rent1": SourceListing(
+                provider="ok",
+                title="LIC Studio in Jackson Park",
+                price_text="$2900 Monthly",
+                location_text="Long Island City, Queens, New York, NY",
+                url=url,
+                description="Studio apartment in Long Island City near subway and gym.",
+                image_urls=["1.jpg", "2.jpg"],
+            ),
+            "rent2": SourceListing(
+                provider="ok",
+                title="LIC Studio with Gym",
+                price_text="$3000 Monthly",
+                location_text="Long Island City, Queens, New York, NY",
+                url=url,
+                description="Studio apartment with laundry and gym in Long Island City.",
+                image_urls=["1.jpg", "2.jpg"],
+            ),
+            "rent3": SourceListing(
+                provider="ok",
+                title="LIC High Floor 1BR",
+                price_text="$3500 Monthly",
+                location_text="Long Island City, Queens, New York, NY",
+                url=url,
+                description="1 bedroom high floor apartment in Long Island City with cinema and terrace.",
+                image_urls=["1.jpg", "2.jpg", "3.jpg"],
+            ),
+            "rent4": SourceListing(
+                provider="ok",
+                title="Elmhurst Furnished 4BR",
+                price_text="$3520 Monthly",
+                location_text="Elmhurst, Queens, New York, NY",
+                url=url,
+                description="Furnished 4 bedroom apartment near subway in Elmhurst.",
+                image_urls=["1.jpg", "2.jpg", "3.jpg"],
+            ),
+            "rent5": SourceListing(
+                provider="ok",
+                title="Jersey City Short-term Room",
+                price_text="$100 Daily",
+                location_text="Jersey City, NJ",
+                url=url,
+                description="Short-term room in Jersey City near PATH.",
+                image_urls=["1.jpg"],
+            ),
+        }
+        return mapping[url]
+
+
 class PropertyCWorkflowTests(unittest.TestCase):
     def test_price_period_normalization(self) -> None:
         value, currency, period, monthly, estimated = parse_price("$100 Daily", "short-term apartment")
@@ -174,6 +238,9 @@ class PropertyCWorkflowTests(unittest.TestCase):
         self.assertEqual(period, "daily")
         self.assertEqual(monthly, 3000.0)
         self.assertTrue(estimated)
+
+    def test_monthly_keyword_implies_rent_intent(self) -> None:
+        self.assertEqual(infer_rent_or_sale("LIC Studio", "Available monthly with gym"), "rent")
 
     def test_search_filters_by_budget_bedrooms_and_features(self) -> None:
         payload = search_properties(
@@ -189,6 +256,7 @@ class PropertyCWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["matched_results"], 1)
         self.assertEqual(payload["listings"][0]["beds"], 2.0)
         self.assertIn("furnished", payload["listings"][0]["features"])
+        self.assertEqual(payload["decision_mode"], "watchlist")
 
     def test_compare_properties_recommends_best_listing(self) -> None:
         payload = compare_properties(FakeConnector(), urls=["u1", "u2"])
@@ -283,12 +351,14 @@ class PropertyCWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(payload["result_quality"]["level"], "medium")
         self.assertEqual(payload["strict_match_count"], 1)
-        self.assertEqual(len(payload["recommended_listings"]), 1)
-        self.assertIn("匹配点", payload["user_facing_response"])
-        self.assertIn("本轮未推荐原因", payload["user_facing_response"])
-        self.assertIn("唯一通过硬条件校验", payload["recommended_listings"][0]["recommendation_reason"])
+        self.assertEqual(payload["decision_mode"], "watchlist")
+        self.assertEqual(payload["recommended_listings"], [])
+        self.assertEqual(len(payload["watchlist_candidates"]), 1)
+        self.assertIn("可参考观察项", payload["user_facing_response"])
+        self.assertIn("为什么这次不直接推荐", payload["user_facing_response"])
+        self.assertIn("继续观察", payload["watchlist_candidates"][0]["decision_reason"])
         self.assertIn("查看详情", payload["user_facing_response"])
-        self.assertTrue(all("CA" not in (item["location_text"] or "") for item in payload["recommended_listings"]))
+        self.assertTrue(all("CA" not in (item["location_text"] or "") for item in payload["watchlist_candidates"]))
 
     def test_low_quality_results_do_not_force_recommendations(self) -> None:
         payload = search_properties(
@@ -304,7 +374,38 @@ class PropertyCWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(payload["result_quality"]["level"], "low")
         self.assertEqual(payload["recommended_listings"], [])
-        self.assertIn("暂不推荐具体房源", payload["user_facing_response"])
+        self.assertEqual(payload["decision_mode"], "explain_only")
+        self.assertIn("不能直接拿来选房", payload["result_judgement"])
+
+    def test_clean_non_nyc_search_can_still_recommend(self) -> None:
+        payload = search_properties(
+            FakeConnector(),
+            keyword="apartment",
+            country="singapore",
+            city="singapore",
+            max_results=2,
+            detail_limit=2,
+        )
+        self.assertEqual(payload["decision_mode"], "recommend")
+        self.assertGreaterEqual(len(payload["recommended_listings"]), 2)
+        self.assertEqual(payload["watchlist_candidates"], [])
+
+    def test_skewed_nyc_results_switch_to_explain_only(self) -> None:
+        payload = search_properties(
+            SkewedNYCRentalConnector(),
+            keyword="apartment",
+            country="usa",
+            city="new-york",
+            rent_or_sale="rent",
+            budget_max=10000,
+            max_results=5,
+            detail_limit=5,
+        )
+        self.assertEqual(payload["decision_mode"], "explain_only")
+        self.assertEqual(payload["recommended_listings"], [])
+        self.assertGreaterEqual(len(payload["watchlist_candidates"]), 1)
+        self.assertIn("Queens/LIC", payload["result_judgement"])
+        self.assertIn("不直接推荐", payload["user_facing_response"])
 
 
 if __name__ == "__main__":

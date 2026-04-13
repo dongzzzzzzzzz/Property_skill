@@ -119,7 +119,7 @@ def parse_price(price_text: str | None, *context_texts: str | None) -> tuple[flo
 
 def infer_rent_or_sale(title: str, description: str | None) -> str | None:
     text = _compact_text(title, description).lower()
-    if any(token in text for token in ["rent", "lease", "per month", "/month"]):
+    if any(token in text for token in ["rent", "lease", "per month", "/month", "monthly", "per week", "/week", "weekly", "per day", "/day", "daily"]):
         return "rent"
     if any(token in text for token in ["sale", "sell", "freehold", "purchase", "buy"]):
         return "sale"
@@ -326,7 +326,7 @@ def normalize_listing(source: SourceListing) -> NormalizedListing:
         price_period=price_period,
         monthly_price_value=monthly_price_value,
         price_is_estimated_monthly=price_is_estimated_monthly,
-        rent_or_sale=infer_rent_or_sale(source.title, source.description),
+        rent_or_sale=infer_rent_or_sale(source.title, _compact_text(source.description, source.price_text)),
         location_text=source.location_text,
         area_name=area_name,
         metro_area=metro_area,

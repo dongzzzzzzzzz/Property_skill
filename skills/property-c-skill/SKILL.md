@@ -36,10 +36,13 @@ python scripts/cli.py find_nearby_schools --provider ok --url "<listing-url>"
 
 ## 输出使用方式
 
-- `search_properties` 的返回里优先使用 `user_facing_response`、`recommended_listings`、`decision_summary`。
+- `search_properties` 的返回里优先使用 `decision_mode`、`result_judgement`、`query_fit_summary`、`recommended_listings`、`watchlist_candidates`、`analysis_sections`、`user_facing_response`。
 - 不要直接把 `listings` 原样平铺给用户；`listings` 主要用于调试和上层二次处理。
-- 推荐区优先使用 `recommended_listings[].recommendation_reason`、`recommended_listings[].tradeoffs`、`recommended_listings[].url`。
+- 推荐区只在 `decision_mode = recommend` 时展示，且优先使用 `recommended_listings[].decision_reason`、`recommended_listings[].why_not_ideal`、`recommended_listings[].url`。
+- 当 `decision_mode = watchlist` 时，只能把 `watchlist_candidates` 展示成“可参考观察项”，不能写成“推荐”。
+- 当 `decision_mode = explain_only` 时，先展示 `result_judgement` 和 `query_fit_summary`，不要输出“首选/推荐度/星级”。
 - 不要自己把“特点/卖点”改写成推荐理由；推荐理由必须优先复用结构化字段里的决策解释。
+- 不要根据 `score` 自己生成“首选”或“Top 1”；必须先看 `decision_mode` 和 `decision_tag`。
 
 ## 扩展提示
 

@@ -150,6 +150,14 @@ def search_properties(
             rent_or_sale=intent_rent_or_sale,
             nyc_area_mode=nyc_area_mode,
         )
+        listing_payload["fit_reasons"] = strict_eval["fit_reasons"]
+        listing_payload["tradeoffs"] = strict_eval["tradeoffs"]
+        listing_payload["strict_evaluation"] = {
+            "is_strict_match": strict_eval["is_strict_match"],
+            "off_target": strict_eval["off_target"],
+            "hard_constraint_miss": strict_eval["hard_constraint_miss"],
+            "suspicious": strict_eval["suspicious"],
+        }
         if exclude_suspicious_low and listing.price_anomaly.get("is_suspicious_low"):
             excluded_outlier_count += 1
             continue
@@ -170,14 +178,39 @@ def search_properties(
         strict_candidates = [item for item in strict_candidates if not item["price_anomaly"].get("is_suspicious_low")]
         excluded_outlier_count = max(excluded_outlier_count, excluded_summary["suspicious_count"])
 
+    area_distribution = _area_distribution(peers)
     result_quality = _assess_result_quality(
         strict_match_count=len(strict_candidates),
         total_candidates=len(peers),
         excluded_summary=excluded_summary,
     )
-    recommended_listings = _select_recommendations(strict_candidates, result_quality["level"])
-    decision_summary = _build_decision_summary(result_quality, len(recommended_listings))
+    decision_context = _build_decision_context(
+        city=city,
+        area=area,
+        keyword=keyword,
+        budget_max=budget_max,
+        peers=peers,
+        strict_candidates=strict_candidates,
+        result_quality=result_quality,
+        area_distribution=area_distribution,
+    )
+    recommended_listings, watchlist_candidates = _build_output_candidates(
+        strict_candidates=strict_candidates,
+        enriched=enriched,
+        decision_mode=decision_context["decision_mode"],
+        city=city,
+        area=area,
+        keyword=keyword,
+        budget_max=budget_max,
+    )
+    decision_summary = _build_decision_summary(
+        decision_mode=decision_context["decision_mode"],
+        result_quality=result_quality,
+        recommendation_count=len(recommended_listings),
+        watchlist_count=len(watchlist_candidates),
+    )
     next_step_suggestion = _build_next_step_suggestions(
+        decision_mode=decision_context["decision_mode"],
         result_quality=result_quality,
         excluded_summary=excluded_summary,
         city=city,
@@ -186,11 +219,25 @@ def search_properties(
         property_type=property_type,
         rent_or_sale=intent_rent_or_sale,
     )
+    analysis_sections = _build_analysis_sections(
+        decision_mode=decision_context["decision_mode"],
+        result_judgement=decision_context["result_judgement"],
+        query_fit_summary=decision_context["query_fit_summary"],
+        recommended_listings=recommended_listings,
+        watchlist_candidates=watchlist_candidates,
+        excluded_summary=excluded_summary,
+        next_step_suggestion=next_step_suggestion,
+    )
     user_facing_response = _build_user_facing_response(
+        decision_mode=decision_context["decision_mode"],
+        result_judgement=decision_context["result_judgement"],
+        query_fit_summary=decision_context["query_fit_summary"],
         decision_summary=decision_summary,
         recommended_listings=recommended_listings,
+        watchlist_candidates=watchlist_candidates,
         excluded_summary=excluded_summary,
         result_quality=result_quality,
+        analysis_sections=analysis_sections,
         next_step_suggestion=next_step_suggestion,
     )
     return {
@@ -218,14 +265,19 @@ def search_properties(
             "matched_results": len(enriched),
             "price_overview_monthly": listing_price_summary(peers),
             "excluded_outlier_count": excluded_outlier_count,
-            "area_distribution": _area_distribution(peers),
+            "area_distribution": area_distribution,
         },
         "listings": enriched,
         "result_quality": result_quality,
+        "decision_mode": decision_context["decision_mode"],
+        "result_judgement": decision_context["result_judgement"],
+        "query_fit_summary": decision_context["query_fit_summary"],
         "strict_match_count": len(strict_candidates),
         "recommended_listings": recommended_listings,
+        "watchlist_candidates": watchlist_candidates,
         "excluded_summary": excluded_summary,
         "decision_summary": decision_summary,
+        "analysis_sections": analysis_sections,
         "next_step_suggestion": next_step_suggestion,
         "user_facing_response": user_facing_response,
         "warnings": _build_search_warnings(
@@ -498,6 +550,78 @@ def _build_why_recommended(listing, scores: dict, current_rank: int) -> str:
     return "虽然有短板，但它仍比其余候选更接近你的硬条件。"
 
 
+def _build_decision_context(
+    *,
+    city: str,
+    area: str | None,
+    keyword: str,
+    budget_max: float | None,
+    peers: list,
+    strict_candidates: list[dict],
+    result_quality: dict[str, object],
+    area_distribution: dict[str, int],
+) -> dict[str, str]:
+    is_nyc = (city or "").lower() in {"new-york", "new york"}
+    generic_city_query = is_nyc and not area and all(
+        token not in (keyword or "").lower()
+        for token in ["manhattan", "brooklyn", "queens", "bronx", "staten island", "long island city", "lic"]
+    )
+    strict_count = len(strict_candidates)
+    total_count = len(peers) or 1
+    dominant_area = next(iter(area_distribution), "unknown")
+    dominant_ratio = (area_distribution.get(dominant_area, 0) / total_count) if total_count else 0.0
+    lic_jersey_count = sum(
+        1
+        for listing in peers
+        if getattr(listing, "sub_area", None) in {"long island city", "jersey city"}
+        or getattr(listing, "borough", None) == "queens"
+    )
+    manhattan_brooklyn_count = sum(
+        1
+        for listing in peers
+        if getattr(listing, "sub_area", None) in {"manhattan", "brooklyn"}
+        or getattr(listing, "borough", None) in {"manhattan", "brooklyn"}
+    )
+
+    if generic_city_query and lic_jersey_count / total_count >= 0.5 and manhattan_brooklyn_count == 0:
+        budget_text = f"在 {int(budget_max):,} 预算内，" if budget_max else ""
+        return {
+            "decision_mode": "explain_only",
+            "result_judgement": "这批结果更像 Queens/LIC 或 Jersey City 的样本，不适合直接当成纽约核心区推荐。",
+            "query_fit_summary": (
+                f"{budget_text}当前平台结果主要集中在 {dominant_area} 一带，"
+                "更适合接受通勤换价格的人做参考；如果你心里想的是曼哈顿或布鲁克林核心区，这批结果不建议直接拿来下判断。"
+            ),
+        }
+
+    if result_quality["level"] == "low":
+        return {
+            "decision_mode": "explain_only",
+            "result_judgement": "这批结果暂时不能直接拿来选房，只能帮助你判断平台当前的供给偏向。",
+            "query_fit_summary": "当前结果里缺少足够可信且贴合需求的候选，如果现在直接推荐，会比帮助更容易误导。",
+        }
+
+    if result_quality["level"] == "medium" or strict_count == 1:
+        return {
+            "decision_mode": "watchlist",
+            "result_judgement": "这轮只有少量可继续观察的候选，先别把它们当成最终推荐。",
+            "query_fit_summary": "当前样本能帮你缩小方向，但还不足以支持直接做决定，更适合作为下一轮精搜的参考。",
+        }
+
+    if generic_city_query and dominant_ratio >= 0.75 and result_quality["level"] == "high" and total_count >= 4:
+        return {
+            "decision_mode": "watchlist",
+            "result_judgement": "这批结果基本可看，但区域分布过于集中，先保留观察更稳妥。",
+            "query_fit_summary": f"当前房源主要集中在 {dominant_area}，虽然条件大体匹配，但还不够均衡，不建议只看这一个区域就下结论。",
+        }
+
+    return {
+        "decision_mode": "recommend",
+        "result_judgement": "这批结果和你的搜索目标基本一致，可以直接从下面的候选开始看。",
+        "query_fit_summary": "当前至少有 2 套以上条件贴合、风险可控的候选，可以先优先比较这几套，再决定是否继续扩大搜索范围。",
+    }
+
+
 def _assess_result_quality(
     *,
     strict_match_count: int,
@@ -524,114 +648,114 @@ def _assess_result_quality(
     }
 
 
-def _select_recommendations(strict_candidates: list[dict], quality_level: str) -> list[dict]:
-    max_items = 2 if quality_level == "high" else 1 if quality_level == "medium" else 0
-    recommendations = []
-    selected = strict_candidates[:max_items]
-    for index, item in enumerate(selected):
-        recommendations.append(
-            {
-                "canonical_id": item["canonical_id"],
-                "title": item["title"],
-                "url": item["url"],
-                "price_text": item["price_text"],
-                "monthly_price_value": item["monthly_price_value"],
-                "location_text": item["location_text"],
-                "rent_or_sale": item["rent_or_sale"],
-                "fit_reasons": item["fit_reasons"],
-                "tradeoffs": item["tradeoffs"],
-                "recommendation_reason": _compose_recommendation_reason(item, selected, strict_candidates, index),
-                "why_recommended": item["why_recommended"],
-                "scores": item["scores"],
-            }
-        )
-    return recommendations
-
-
-def _build_decision_summary(result_quality: dict[str, object], recommendation_count: int) -> str:
-    level = result_quality["level"]
-    strict_match_count = result_quality["strict_match_count"]
-    if level == "high":
-        return f"这轮结果里有 {strict_match_count} 套较可信候选，我只保留了最值得先看的 {recommendation_count} 套。"
-    if level == "medium":
-        return "这轮只找到 1 套相对靠谱的候选，其余结果要么区域跑偏，要么不满足你的硬条件。"
-    return "这轮没有找到足够可信的候选，继续硬推具体房源会误导你。"
-
-
-def _build_next_step_suggestions(
+def _build_output_candidates(
     *,
-    result_quality: dict[str, object],
-    excluded_summary: dict[str, int],
+    strict_candidates: list[dict],
+    enriched: list[dict],
+    decision_mode: str,
     city: str,
     area: str | None,
-    bedrooms: float | None,
-    property_type: str | None,
-    rent_or_sale: str | None,
-) -> list[str]:
-    suggestions = []
-    if result_quality["level"] == "low" and (city or "").lower() in {"new-york", "new york"}:
-        suggestions.append("把范围收紧到 Manhattan、Brooklyn 或 Queens，再单独搜一轮。")
-    if excluded_summary["wrong_property_type_count"] > excluded_summary["off_target_location_count"] and property_type:
-        suggestions.append(f"如果你接受，可把房型从 {property_type} 放宽到 apartment/condo。")
-    if excluded_summary["wrong_bedroom_count"] and bedrooms is not None:
-        suggestions.append(f"当前 {int(bedrooms)} 室严格匹配偏少，可以确认是否接受相邻户型。")
-    if rent_or_sale == "sale":
-        suggestions.append("下一轮建议显式加上 for sale，避免租房或短租结果混入。")
-    if area:
-        suggestions.append(f"可以继续指定 {area} 内的细分板块，提高结果纯度。")
-    return suggestions[:3] or ["先继续补召回，再决定要不要放宽条件。"]
+    keyword: str,
+    budget_max: float | None,
+) -> tuple[list[dict], list[dict]]:
+    if decision_mode == "recommend":
+        selected = strict_candidates[:2]
+        return (
+            [
+                _build_candidate_card(
+                    item,
+                    decision_mode=decision_mode,
+                    strict_candidates=strict_candidates,
+                    index=index,
+                    city=city,
+                    area=area,
+                    keyword=keyword,
+                    budget_max=budget_max,
+                )
+                for index, item in enumerate(selected)
+            ],
+            [],
+        )
 
-
-def _build_user_facing_response(
-    *,
-    decision_summary: str,
-    recommended_listings: list[dict],
-    excluded_summary: dict[str, int],
-    result_quality: dict[str, object],
-    next_step_suggestion: list[str],
-) -> str:
-    lines = [decision_summary, ""]
-    if recommended_listings:
-        lines.append("推荐结果：")
-        for index, item in enumerate(recommended_listings, start=1):
-            lines.append(f"{index}. {item['title']}")
-            price_line = item["price_text"] or "价格待确认"
-            if item.get("monthly_price_value") and item.get("rent_or_sale") == "rent":
-                price_line += f"（按月口径约 {item['monthly_price_value']:.0f}）"
-            lines.append(f"价格：{price_line}")
-            if item.get("location_text"):
-                lines.append(f"位置：{item['location_text']}")
-            lines.append("匹配点：" + "；".join(item["fit_reasons"]))
-            lines.append("推荐理由：" + item["recommendation_reason"])
-            lines.append("明显短板：" + ("；".join(item["tradeoffs"]) if item["tradeoffs"] else "暂无明显短板"))
-            lines.append("为什么仍然推荐：" + item["why_recommended"])
-            if item.get("url"):
-                lines.append(f"查看详情：{item['url']}")
-            lines.append("")
-        lines.append("为什么只推荐这些：这些房源至少通过了位置、买卖意图和户型等硬条件校验，其余候选没有达到推荐标准。")
-    else:
-        lines.append("这轮暂不推荐具体房源，因为当前结果里没有足够可信的候选。")
-
-    lines.append("")
-    excluded_parts = [
-        f"{excluded_summary['off_target_location_count']} 套位置明显跑偏" if excluded_summary["off_target_location_count"] else "",
-        f"{excluded_summary['wrong_bedroom_count']} 套不满足卧室数要求" if excluded_summary["wrong_bedroom_count"] else "",
-        f"{excluded_summary['wrong_property_type_count']} 套房型不符" if excluded_summary["wrong_property_type_count"] else "",
-        f"{excluded_summary['wrong_rent_or_sale_count']} 套买卖意图不明确或不符" if excluded_summary["wrong_rent_or_sale_count"] else "",
-        f"{excluded_summary['suspicious_count']} 套属于短租/异常价格" if excluded_summary["suspicious_count"] else "",
+    pool = strict_candidates[:2] if strict_candidates else enriched[:2]
+    watchlist = [
+        _build_candidate_card(
+            item,
+            decision_mode=decision_mode,
+            strict_candidates=strict_candidates,
+            index=index,
+            city=city,
+            area=area,
+            keyword=keyword,
+            budget_max=budget_max,
+        )
+        for index, item in enumerate(pool)
     ]
-    lines.append("本轮未推荐原因：" + ("；".join(part for part in excluded_parts if part) or "其余候选没有通过硬条件校验。"))
-    lines.append(f"本轮判断：{result_quality['label']}。")
-    lines.append("下一步建议：" + "；".join(next_step_suggestion))
-    return "\n".join(line for line in lines if line is not None)
+    return [], watchlist
 
 
-def _compose_recommendation_reason(
+def _build_candidate_card(
     item: dict,
-    selected: list[dict],
+    *,
+    decision_mode: str,
     strict_candidates: list[dict],
     index: int,
-) -> str:
+    city: str,
+    area: str | None,
+    keyword: str,
+    budget_max: float | None,
+) -> dict:
+    fit_reasons = item.get("fit_reasons") or ["与本次搜索条件部分匹配"]
+    tradeoffs = item.get("tradeoffs") or []
+    suitable_for, not_suitable_for = _infer_audience_fit(item, city=city, area=area, keyword=keyword, budget_max=budget_max)
+    decision_tag = _decision_tag_for_item(item, decision_mode)
+    why_not_ideal = "；".join(tradeoffs) if tradeoffs else _fallback_why_not_ideal(item, decision_mode, city=city)
+    if decision_mode == "recommend":
+        decision_reason = _compose_recommendation_reason(item, strict_candidates, index)
+    elif decision_mode == "watchlist":
+        decision_reason = _compose_watchlist_reason(item, strict_candidates, index)
+    else:
+        decision_reason = _compose_explain_reason(item, city=city)
+
+    return {
+        "canonical_id": item["canonical_id"],
+        "title": item["title"],
+        "url": item.get("url"),
+        "price_text": item.get("price_text"),
+        "monthly_price_value": item.get("monthly_price_value"),
+        "location_text": item.get("location_text"),
+        "rent_or_sale": item.get("rent_or_sale"),
+        "fit_reasons": fit_reasons,
+        "tradeoffs": tradeoffs,
+        "fit_for_user": "；".join(fit_reasons),
+        "why_not_ideal": why_not_ideal,
+        "decision_reason": decision_reason,
+        "recommendation_reason": decision_reason,
+        "suitable_for": suitable_for,
+        "not_suitable_for": not_suitable_for,
+        "decision_tag": decision_tag,
+        "why_recommended": item.get("why_recommended"),
+        "scores": item.get("scores", {}),
+    }
+
+
+def _decision_tag_for_item(item: dict, decision_mode: str) -> str:
+    if decision_mode == "recommend":
+        return "can_consider"
+    if item.get("strict_evaluation", {}).get("is_strict_match"):
+        return "not_enough_to_recommend"
+    return "mismatch_with_goal"
+
+
+def _fallback_why_not_ideal(item: dict, decision_mode: str, *, city: str) -> str:
+    if decision_mode == "explain_only" and (city or "").lower() in {"new-york", "new york"}:
+        return "它本身不一定有明显问题，但所在区域更像替代选项，不足以代表你真正想看的纽约核心区选择。"
+    if decision_mode == "watchlist":
+        return "它本身条件不差，但当前可对照样本太少，还不足以直接下结论。"
+    return "暂无明显短板"
+
+
+def _compose_recommendation_reason(item: dict, strict_candidates: list[dict], index: int) -> str:
     strict_count = len(strict_candidates)
     lead = f"它是当前仅有的 {strict_count} 套严格匹配房源之一"
     if strict_count == 1:
@@ -650,14 +774,10 @@ def _compose_recommendation_reason(
         elif item_price == max(prices) and len(prices) > 1:
             price_reason = "虽然价格不是最低，但并没有因为低价牺牲匹配度"
 
-    completeness = item["scores"].get("completeness_score", 0)
-    completeness_reason = ""
-    if completeness >= 12:
-        completeness_reason = "信息完整度也更高"
-    elif completeness < 9:
-        completeness_reason = "信息完整度一般"
+    completeness = item.get("scores", {}).get("completeness_score", 0)
+    completeness_reason = "信息完整度也更高" if completeness >= 12 else "信息完整度一般" if completeness < 9 else ""
 
-    location_score = item["scores"].get("location_relevance_score", 0)
+    location_score = item.get("scores", {}).get("location_relevance_score", 0)
     location_reason = "位置相关性更强" if location_score >= 25 else ""
 
     reasons = [part for part in [price_reason, completeness_reason, location_reason] if part]
@@ -667,6 +787,193 @@ def _compose_recommendation_reason(
         reasons.append("它仍然比其余未推荐候选更贴近你的要求")
 
     return lead + "，" + "、".join(reasons) + "，所以值得优先看。"
+
+
+def _compose_watchlist_reason(item: dict, strict_candidates: list[dict], index: int) -> str:
+    strict_count = len(strict_candidates)
+    if strict_count <= 1:
+        return "它基本符合当前搜索条件，但当前样本太少，还不够支撑直接推荐，更适合作为继续观察的候选。"
+    if index == 0:
+        return "它在当前候选里条件相对靠前，但结果分布不够均衡，先保留观察，比直接推荐更稳妥。"
+    return "它有一定参考价值，但还不足以单独支撑决策，建议先和更多同类房源一起比较。"
+
+
+def _compose_explain_reason(item: dict, *, city: str) -> str:
+    location = item.get("location_text") or item.get("title") or "当前样本"
+    if (city or "").lower() in {"new-york", "new york"}:
+        return f"{location} 说明这个平台当前更容易搜到周边或替代区域样本，但它不足以直接代表你真正想看的纽约核心区选择。"
+    return f"{location} 可以作为平台当前可见样本参考，但还不足以直接作为推荐结果。"
+
+
+def _infer_audience_fit(
+    item: dict,
+    *,
+    city: str,
+    area: str | None,
+    keyword: str,
+    budget_max: float | None,
+) -> tuple[str, str]:
+    location_text = (item.get("location_text") or "").lower()
+    title_text = (item.get("title") or "").lower()
+    text = f"{location_text} {title_text}"
+    suitable = []
+    unsuitable = []
+
+    if budget_max and item.get("monthly_price_value") is not None and item["monthly_price_value"] <= budget_max * 0.6:
+        suitable.append("预算优先的人")
+    if "furnished" in text:
+        suitable.append("希望尽快入住的人")
+    if "subway" in text or "mrt" in text or "metro" in text:
+        suitable.append("依赖公共交通通勤的人")
+    if any(token in text for token in ["long island city", "queens", "jersey city"]):
+        suitable.append("接受通勤换价格的人")
+    if (city or "").lower() in {"new-york", "new york"} and any(token in text for token in ["long island city", "queens", "jersey city"]):
+        unsuitable.append("只看曼哈顿或布鲁克林核心区的人")
+    if "studio" in text or "room" in text:
+        unsuitable.append("对空间和居住功能要求更高的家庭")
+    if area:
+        unsuitable.append(f"只接受 {area} 精确板块的人")
+
+    suitable_text = "、".join(dict.fromkeys(suitable)) if suitable else "想先摸清平台上可见样本的人"
+    unsuitable_text = "、".join(dict.fromkeys(unsuitable)) if unsuitable else "希望一步到位锁定最终房源的人"
+    return suitable_text, unsuitable_text
+
+
+def _build_decision_summary(
+    *,
+    decision_mode: str,
+    result_quality: dict[str, object],
+    recommendation_count: int,
+    watchlist_count: int,
+) -> str:
+    if decision_mode == "recommend":
+        return f"这轮结果和你的目标基本一致，我保留了 {recommendation_count} 套最值得先看的候选。"
+    if decision_mode == "watchlist":
+        return f"这轮只有 {watchlist_count} 套可继续观察的候选，但还不够稳，不建议直接当成最终推荐。"
+    return "这轮结果更适合帮助你判断平台供给方向，而不是直接替你做选房决定。"
+
+
+def _build_next_step_suggestions(
+    *,
+    decision_mode: str,
+    result_quality: dict[str, object],
+    excluded_summary: dict[str, int],
+    city: str,
+    area: str | None,
+    bedrooms: float | None,
+    property_type: str | None,
+    rent_or_sale: str | None,
+) -> list[str]:
+    suggestions = []
+    if decision_mode == "explain_only" and (city or "").lower() in {"new-york", "new york"}:
+        suggestions.append("先单独搜 Manhattan、Brooklyn 和 Queens，分开看平台真实供给。")
+    if result_quality["level"] == "low" and (city or "").lower() in {"new-york", "new york"}:
+        suggestions.append("把范围收紧到 Manhattan、Brooklyn 或 Queens，再单独搜一轮。")
+    if excluded_summary["wrong_property_type_count"] > excluded_summary["off_target_location_count"] and property_type:
+        suggestions.append(f"如果你接受，可把房型从 {property_type} 放宽到 apartment/condo。")
+    if excluded_summary["wrong_bedroom_count"] and bedrooms is not None:
+        suggestions.append(f"当前 {int(bedrooms)} 室严格匹配偏少，可以确认是否接受相邻户型。")
+    if rent_or_sale == "sale":
+        suggestions.append("下一轮建议显式加上 for sale，避免租房或短租结果混入。")
+    if rent_or_sale == "rent":
+        suggestions.append("下一轮可以加上 monthly rent 或排除 short-term，减少短租样本干扰。")
+    if area:
+        suggestions.append(f"可以继续指定 {area} 内的细分板块，提高结果纯度。")
+    return suggestions[:3] or ["先继续补召回，再决定要不要放宽条件。"]
+
+
+def _build_analysis_sections(
+    *,
+    decision_mode: str,
+    result_judgement: str,
+    query_fit_summary: str,
+    recommended_listings: list[dict],
+    watchlist_candidates: list[dict],
+    excluded_summary: dict[str, int],
+    next_step_suggestion: list[str],
+) -> dict[str, object]:
+    candidate_source = recommended_listings if decision_mode == "recommend" else watchlist_candidates
+    candidate_analysis = [
+        {
+            "title": item["title"],
+            "decision_tag": item["decision_tag"],
+            "decision_reason": item["decision_reason"],
+            "fit_for_user": item["fit_for_user"],
+            "why_not_ideal": item["why_not_ideal"],
+        }
+        for item in candidate_source
+    ]
+    excluded_parts = [
+        f"{excluded_summary['off_target_location_count']} 套位置明显跑偏" if excluded_summary["off_target_location_count"] else "",
+        f"{excluded_summary['wrong_bedroom_count']} 套不满足卧室数要求" if excluded_summary["wrong_bedroom_count"] else "",
+        f"{excluded_summary['wrong_property_type_count']} 套房型不符" if excluded_summary["wrong_property_type_count"] else "",
+        f"{excluded_summary['wrong_rent_or_sale_count']} 套买卖意图不明确或不符" if excluded_summary["wrong_rent_or_sale_count"] else "",
+        f"{excluded_summary['suspicious_count']} 套属于短租/异常价格" if excluded_summary["suspicious_count"] else "",
+    ]
+    return {
+        "judgement": result_judgement,
+        "fit_analysis": query_fit_summary,
+        "candidate_analysis": candidate_analysis,
+        "why_not_direct_recommendation": (
+            "；".join(part for part in excluded_parts if part)
+            if decision_mode != "recommend"
+            else "其余候选没有达到当前推荐标准。"
+        ),
+        "next_steps": list(next_step_suggestion),
+    }
+
+
+def _build_user_facing_response(
+    *,
+    decision_mode: str,
+    result_judgement: str,
+    query_fit_summary: str,
+    decision_summary: str,
+    recommended_listings: list[dict],
+    watchlist_candidates: list[dict],
+    excluded_summary: dict[str, int],
+    result_quality: dict[str, object],
+    analysis_sections: dict[str, object],
+    next_step_suggestion: list[str],
+) -> str:
+    lines = [
+        f"一句话判断：{result_judgement}",
+        f"总体分析：{query_fit_summary}",
+        "",
+    ]
+    candidate_source = recommended_listings if decision_mode == "recommend" else watchlist_candidates
+    if candidate_source:
+        title = "推荐结果：" if decision_mode == "recommend" else "可参考观察项：" if decision_mode == "watchlist" else "当前平台可见样本（不直接推荐）："
+        lines.append(title)
+        for index, item in enumerate(candidate_source, start=1):
+            lines.append(f"{index}. {item['title']}")
+            price_line = item["price_text"] or "价格待确认"
+            if item.get("monthly_price_value") and item.get("rent_or_sale") == "rent":
+                price_line += f"（按月口径约 {item['monthly_price_value']:.0f}）"
+            lines.append(f"价格：{price_line}")
+            if item.get("location_text"):
+                lines.append(f"位置：{item['location_text']}")
+            lines.append("为什么它贴合这次搜索：" + item["fit_for_user"])
+            lines.append("为什么它又不是最理想选择：" + item["why_not_ideal"])
+            lines.append("这次怎么处理它：" + item["decision_reason"])
+            lines.append(f"更适合谁：{item['suitable_for']}")
+            lines.append(f"不太适合谁：{item['not_suitable_for']}")
+            if item.get("url"):
+                lines.append(f"查看详情：{item['url']}")
+            lines.append("")
+        if decision_mode == "recommend":
+            lines.append("为什么只推荐这些：这些房源至少通过了位置、买卖意图和户型等硬条件校验，其余候选没有达到推荐标准。")
+    else:
+        lines.append("候选分析：当前没有足够可信的候选可供展开。")
+
+    lines.append("")
+    if decision_mode != "recommend":
+        lines.append("为什么这次不直接推荐：" + analysis_sections["why_not_direct_recommendation"])
+    else:
+        lines.append("为什么这次可以直接推荐：至少有 2 套以上候选同时满足核心条件，且没有明显异常。")
+    lines.append(f"本轮结果可信度：{result_quality['label']}。")
+    lines.append("下一步建议：" + "；".join(next_step_suggestion))
+    return "\n".join(line for line in lines if line is not None)
 
 
 def compare_properties(
