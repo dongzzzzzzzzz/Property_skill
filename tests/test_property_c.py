@@ -584,9 +584,10 @@ class PropertyCWorkflowTests(unittest.TestCase):
             max_results=20,
             detail_limit=20,
         )
-        self.assertEqual(payload["property_skill_requested_max_results"], 20)
+        self.assertEqual(payload["requested_max_results"], 20)
+        self.assertEqual(payload["effective_max_results"], 100)
         self.assertEqual(payload["effective_candidate_pool_size"], 2)
-        self.assertIn("当前样本量低于推荐分析默认值 100", " ".join(payload["warnings"]))
+        self.assertIn("调用方请求了 20 条样本", " ".join(payload["warnings"]))
         self.assertIn("render_ready_summary", payload)
         self.assertIn("decision_brief", payload)
         self.assertIn("must_show_findings", payload)
@@ -597,6 +598,20 @@ class PropertyCWorkflowTests(unittest.TestCase):
         self.assertIn("primary_image_url", compact)
         self.assertIn("样本仍有限", payload["sample_basis_short"])
         self.assertIn("平台当前有效样本仍然有限", payload["user_facing_response"])
+
+    def test_decision_search_promotes_low_requested_sample_size(self) -> None:
+        connector = RecordingConnector()
+        payload = search_properties(
+            connector,
+            keyword="apartment",
+            country="singapore",
+            city="singapore",
+            max_results=20,
+        )
+        self.assertEqual(payload["requested_max_results"], 20)
+        self.assertEqual(payload["effective_max_results"], 100)
+        self.assertEqual(connector.search_calls[0]["max_results"], 100)
+        self.assertIn("自动提升到 100 条目标样本", " ".join(payload["must_show_findings"]))
 
     def test_non_nyc_search_does_not_leak_manhattan_area_label(self) -> None:
         payload = search_properties(

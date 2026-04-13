@@ -1,21 +1,27 @@
 # Property C Output Contract
 
-`property-c-skill` 的上层调用方，优先消费下面这些字段，而不是自己从 `listings` 里拼一版自由文本。
+`property-c-skill` 的上层调用方，应优先消费 compact 输出和决策字段，而不是自己从 `listings` 里拼一版自由文本。
 
-## 顶层输出
+## Compact Output
+
+- `decision_brief`
+- `render_ready_summary`
+- `must_show_findings`
+- `recommendation_cards_compact`
+- `compare_takeaways_short`
+- `why_these_listings`
+- `why_not_more`
+- `sample_basis_short`
+- `image_and_link_summary`
+
+这些字段是上层首选展示源。
+
+## Full Analysis
 
 - `decision_mode`
   - `recommend`：可以展示“推荐结果”
   - `watchlist`：只能展示“可参考观察项”
   - `explain_only`：只能展示“结果说明/样本分析”
-- `render_ready_summary`
-- `decision_brief`
-- `must_show_findings`
-- `recommendation_cards_compact`
-- `why_these_listings`
-- `why_not_more`
-- `sample_basis_short`
-- `image_and_link_summary`
 - `result_judgement`
 - `query_fit_summary`
 - `compare_matrix`
@@ -25,6 +31,9 @@
 - `analysis_sections`
 - `user_facing_response`
 - `summary.confidence_basis`
+- `requested_max_results`
+- `effective_max_results`
+- `effective_candidate_pool_size`
 
 ## 候选卡片
 
@@ -49,7 +58,7 @@
 
 ## 硬规则
 
-- 找房时优先调用 `python scripts/run_property_c_search.py ...`，不要直接调用 `ok-core-skill search/browse-category`。
+- 找房时优先调用 `python scripts/cli.py search_properties ...`，不要直接调用 `ok-core-skill search/browse-category`。
 - 不要把 `listings` 原样平铺给用户。
 - 不要根据 `score` 自己生成“首选/Top1/星级”。
 - 缺失字段必须显式展示，`unknown` 只能解释成“当前页面没有足够信息支持判断”。

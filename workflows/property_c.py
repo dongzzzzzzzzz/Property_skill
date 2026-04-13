@@ -45,6 +45,8 @@ def search_properties(
     geocoder = NominatimGeocoder()
     required_features = normalize_feature_input(features)
     intent_rent_or_sale = _infer_rent_or_sale_intent(keyword, rent_or_sale)
+    requested_max_results = max_results
+    effective_max_results = _effective_max_results(requested_max_results)
     search_rounds = _build_search_rounds(
         keyword=keyword,
         area=area,
@@ -59,7 +61,7 @@ def search_properties(
         country=country,
         city=city,
         lang=lang,
-        max_results=max_results,
+        max_results=effective_max_results,
         detail_limit=detail_limit,
         search_rounds=search_rounds,
         budget_min=budget_min,
@@ -272,6 +274,8 @@ def search_properties(
         sample_basis_short=sample_basis_short,
         sample_size_level=sample_size_level,
         compare_takeaways_short=compare_takeaways_short,
+        requested_max_results=requested_max_results,
+        effective_max_results=effective_max_results,
     )
     recommendation_cards_compact = _build_recommendation_cards_compact(candidate_source or enriched)
     decision_brief = {
@@ -292,6 +296,7 @@ def search_properties(
         must_show_findings=must_show_findings,
     )
     user_facing_response = _build_user_facing_response(
+        render_ready_summary=render_ready_summary,
         decision_mode=decision_context["decision_mode"],
         result_judgement=decision_context["result_judgement"],
         query_fit_summary=decision_context["query_fit_summary"],
@@ -326,7 +331,8 @@ def search_properties(
         "summary": {
             "provider_results": search_meta["provider_results"],
             "candidate_pool_size": search_meta["candidate_pool_size"],
-            "property_skill_requested_max_results": max_results,
+            "requested_max_results": requested_max_results,
+            "effective_max_results": effective_max_results,
             "effective_candidate_pool_size": search_meta["candidate_pool_size"],
             "underlying_provider_calls": len(search_meta["search_rounds"]),
             "search_rounds": search_meta["search_rounds"],
@@ -366,7 +372,8 @@ def search_properties(
         "sample_basis_short": sample_basis_short,
         "compare_takeaways_short": compare_takeaways_short,
         "image_and_link_summary": image_and_link_summary,
-        "property_skill_requested_max_results": max_results,
+        "requested_max_results": requested_max_results,
+        "effective_max_results": effective_max_results,
         "effective_candidate_pool_size": search_meta["candidate_pool_size"],
         "user_facing_response": user_facing_response,
         "warnings": _build_search_warnings(
@@ -376,7 +383,8 @@ def search_properties(
             nyc_area_mode=nyc_area_mode,
             excluded_outlier_count=excluded_outlier_count,
             used_near_filter=bool(near or (near_lat is not None and near_lng is not None)),
-            requested_max_results=max_results,
+            requested_max_results=requested_max_results,
+            effective_max_results=effective_max_results,
         ),
         "confidence": _confidence_from_results(enriched),
     }
@@ -548,6 +556,10 @@ def _detail_stage_targets(*, max_results: int, detail_limit: int) -> list[int]:
         if value not in deduped:
             deduped.append(value)
     return deduped
+
+
+def _effective_max_results(requested_max_results: int) -> int:
+    return max(requested_max_results, 100)
 
 
 def _hydrate_detail_stage(
@@ -1244,9 +1256,15 @@ def _build_must_show_findings(
     sample_basis_short: str,
     sample_size_level: str,
     compare_takeaways_short: list[str],
+    requested_max_results: int,
+    effective_max_results: int,
 ) -> list[str]:
     findings = [sample_basis_short]
     findings.extend(compare_takeaways_short[:2])
+    if requested_max_results < effective_max_results:
+        findings.append(
+            f"调用方原本只请求了 {requested_max_results} 条样本，决策分析已自动提升到 {effective_max_results} 条目标样本。"
+        )
     if sample_size_level == "small":
         findings.append("当前平台有效样本偏少，这轮结论只能算中等可信。")
     same_location = {
@@ -1256,6 +1274,16 @@ def _build_must_show_findings(
     }
     if len(same_location) == 1 and len(candidate_source) >= 2:
         findings.append("两套候选都在同一位置，更像同一类学生公寓或同楼库存。")
+    missing_fields = sorted(
+        {
+            field
+            for item in candidate_source
+            for field in (item.get("missing_fields") or [])
+            if field in {"bathrooms", "area_size", "parking", "pet_policy", "images"}
+        }
+    )
+    if missing_fields:
+        findings.append("当前仍有这些关键字段待确认：" + "、".join(missing_fields[:4]) + "。")
     return list(dict.fromkeys(findings))[:5]
 
 
@@ -1384,6 +1412,7 @@ def _build_analysis_sections(
 
 def _build_user_facing_response(
     *,
+    render_ready_summary: str,
     decision_mode: str,
     result_judgement: str,
     query_fit_summary: str,
@@ -1397,7 +1426,8 @@ def _build_user_facing_response(
     next_step_suggestion: list[str],
 ) -> str:
     lines = [
-        f"一句话判断：{result_judgement}",
+        render_ready_summary,
+        "",
         f"总体分析：{query_fit_summary}",
         f"结论依据：{decision_summary}",
         "",
@@ -1675,6 +1705,7 @@ def _build_search_warnings(
     excluded_outlier_count: int,
     used_near_filter: bool,
     requested_max_results: int,
+    effective_max_results: int,
 ) -> list[str]:
     warnings = []
     if used_near_filter and target_point is None:
@@ -1688,7 +1719,9 @@ def _build_search_warnings(
     if excluded_outlier_count:
         warnings.append(f"Excluded {excluded_outlier_count} suspiciously low-priced listing(s).")
     if requested_max_results < 100:
-        warnings.append("当前样本量低于推荐分析默认值 100，结论可信度会下降。")
+        warnings.append(
+            f"调用方请求了 {requested_max_results} 条样本，但决策分析默认至少按 {effective_max_results} 条样本执行；若平台实际返回不足该值，则按实际返回量分析。"
+        )
     return warnings
 
 
