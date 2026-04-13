@@ -50,7 +50,7 @@ def _add_locale_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--country", default="singapore")
     parser.add_argument("--city", default="singapore")
     parser.add_argument("--lang", default="en")
-    parser.add_argument("--max-results", type=int, default=10)
+    parser.add_argument("--max-results", type=int, default=100)
 
 
 def main() -> None:
@@ -61,7 +61,7 @@ def main() -> None:
     _add_connector_args(p)
     _add_locale_args(p)
     p.add_argument("--keyword", default="")
-    p.add_argument("--detail-limit", type=int, default=10)
+    p.add_argument("--detail-limit", type=int, default=20)
     p.add_argument("--budget-min", type=float)
     p.add_argument("--budget-max", type=float)
     p.add_argument("--bedrooms", type=float)

@@ -72,7 +72,7 @@ class OKConnector(BasePropertyConnector):
         country: str = "singapore",
         city: str = "singapore",
         lang: str = "en",
-        max_results: int = 10,
+        max_results: int = 100,
     ) -> list[SourceListing]:
         payload = self._run_cli(
             [
@@ -89,7 +89,7 @@ class OKConnector(BasePropertyConnector):
                 str(max_results),
             ]
         )
-        return [self._build_source_listing(item) for item in payload.get("listings", [])]
+        return [self._build_source_listing(item, detail_fetched=False) for item in payload.get("listings", [])]
 
     def browse_property(
         self,
@@ -97,7 +97,7 @@ class OKConnector(BasePropertyConnector):
         country: str = "singapore",
         city: str = "singapore",
         lang: str = "en",
-        max_results: int = 10,
+        max_results: int = 100,
     ) -> list[SourceListing]:
         payload = self._run_cli(
             [
@@ -114,13 +114,13 @@ class OKConnector(BasePropertyConnector):
                 str(max_results),
             ]
         )
-        return [self._build_source_listing(item) for item in payload.get("listings", [])]
+        return [self._build_source_listing(item, detail_fetched=False) for item in payload.get("listings", [])]
 
     def get_listing_detail(self, *, url: str) -> SourceListing:
         payload = self._run_cli(["get-listing", "--url", url])
-        return self._build_source_listing(payload)
+        return self._build_source_listing(payload, detail_fetched=True)
 
-    def _build_source_listing(self, payload: dict) -> SourceListing:
+    def _build_source_listing(self, payload: dict, *, detail_fetched: bool) -> SourceListing:
         images = payload.get("images") or []
         if payload.get("image_url"):
             images = [payload["image_url"], *images]
@@ -136,6 +136,6 @@ class OKConnector(BasePropertyConnector):
             seller_name=payload.get("seller_name"),
             posted_time=payload.get("posted_time"),
             category=payload.get("category"),
+            detail_fetched=detail_fetched,
             raw=dict(payload),
         )
-

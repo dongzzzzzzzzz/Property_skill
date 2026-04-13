@@ -220,6 +220,28 @@ def classify_image_quality(image_urls: Iterable[str] | None) -> str:
     return "real_images"
 
 
+def select_primary_image(image_urls: Iterable[str] | None, image_quality: str) -> str | None:
+    urls = [url for url in (image_urls or []) if url]
+    if not urls:
+        return None
+    if image_quality in {"real_images", "mixed"}:
+        for url in urls:
+            lowered = url.lower()
+            if not any(marker in lowered for marker in PLACEHOLDER_IMAGE_MARKERS):
+                return url
+    return urls[0]
+
+
+def build_image_note(image_quality: str) -> str:
+    if image_quality == "real_images":
+        return "当前有可用图片"
+    if image_quality == "mixed":
+        return "包含占位图，图片可信度一般"
+    if image_quality == "placeholder_only":
+        return "当前只有占位图，无法据此判断真实房屋情况"
+    return "当前没有可用图片"
+
+
 def infer_pet_policy(title: str, description: str | None) -> str | None:
     text = _compact_text(title, description).lower()
     if any(keyword in text for keyword in PET_BLOCKED_KEYWORDS):
@@ -519,6 +541,8 @@ def normalize_listing(source: SourceListing) -> NormalizedListing:
     area_size_value, area_size_unit = infer_area_size(source.title, source.description)
     features = extract_features(source.title, source.description)
     image_quality = classify_image_quality(source.image_urls)
+    primary_image_url = select_primary_image(source.image_urls, image_quality)
+    image_note = build_image_note(image_quality)
     pet_policy = infer_pet_policy(source.title, source.description)
     canonical_id = build_canonical_id(source.provider, source.listing_id, source.url)
     metro_area, sub_area, borough = classify_nyc_area(source.title, source.location_text, source.description)
@@ -584,8 +608,11 @@ def normalize_listing(source: SourceListing) -> NormalizedListing:
         features=features,
         description=source.description,
         image_urls=list(source.image_urls),
+        primary_image_url=primary_image_url,
+        image_note=image_note,
         posted_time=source.posted_time,
         seller_name=source.seller_name,
+        detail_hydrated=source.detail_fetched,
         parse_confidence=min(confidence, 1.0),
         warnings=(
             ["This listing was normalized from a daily/weekly rate."]

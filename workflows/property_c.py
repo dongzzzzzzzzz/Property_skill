@@ -26,8 +26,8 @@ def search_properties(
     country: str = "singapore",
     city: str = "singapore",
     lang: str = "en",
-    max_results: int = 10,
-    detail_limit: int = 10,
+    max_results: int = 100,
+    detail_limit: int = 20,
     budget_min: float | None = None,
     budget_max: float | None = None,
     bedrooms: float | None = None,
@@ -166,7 +166,7 @@ def search_properties(
             excluded_outlier_count += 1
             continue
         enriched.append(listing_payload)
-        if strict_eval["is_strict_match"]:
+        if strict_eval["is_strict_match"] and listing.detail_hydrated:
             strict_candidates.append(
                 {
                     **listing_payload,
@@ -210,11 +210,24 @@ def search_properties(
     candidate_source = recommended_listings if decision_context["decision_mode"] == "recommend" else watchlist_candidates
     compare_matrix = build_compare_matrix(candidate_source[:3]) if candidate_source else build_compare_matrix(enriched[:3])
     field_coverage = summarize_field_coverage(candidate_source[:3]) if candidate_source else summarize_field_coverage(enriched[:3])
+    confidence_basis = _build_confidence_basis(
+        candidate_pool_size=search_meta["candidate_pool_size"],
+        detail_hydrated_count=search_meta["detail_hydrated_count"],
+        shallow_only_count=search_meta["shallow_only_count"],
+    )
+    compare_matrix["sample_basis"] = confidence_basis
+    compare_matrix["comparison_takeaways"] = [
+        confidence_basis,
+        *(compare_matrix.get("comparison_takeaways") or []),
+    ]
     decision_summary = _build_decision_summary(
         decision_mode=decision_context["decision_mode"],
         result_quality=result_quality,
         recommendation_count=len(recommended_listings),
         watchlist_count=len(watchlist_candidates),
+        candidate_pool_size=search_meta["candidate_pool_size"],
+        detail_hydrated_count=search_meta["detail_hydrated_count"],
+        shallow_only_count=search_meta["shallow_only_count"],
     )
     next_step_suggestion = _build_next_step_suggestions(
         decision_mode=decision_context["decision_mode"],
@@ -271,8 +284,12 @@ def search_properties(
         },
         "summary": {
             "provider_results": search_meta["provider_results"],
+            "candidate_pool_size": search_meta["candidate_pool_size"],
             "search_rounds": search_meta["search_rounds"],
             "matched_results": len(enriched),
+            "detail_hydrated_count": search_meta["detail_hydrated_count"],
+            "shallow_only_count": search_meta["shallow_only_count"],
+            "confidence_basis": confidence_basis,
             "price_overview_monthly": listing_price_summary(peers),
             "excluded_outlier_count": excluded_outlier_count,
             "area_distribution": area_distribution,
@@ -332,6 +349,8 @@ def _collect_search_candidates(
     collected = []
     provider_results = 0
     round_summaries = []
+    stage_targets = _detail_stage_targets(max_results=max_results, detail_limit=detail_limit)
+    strict_count = 0
 
     for index, query in enumerate(search_rounds[:3], start=1):
         source_listings = (
@@ -349,7 +368,7 @@ def _collect_search_candidates(
         normalized_round = hydrate_and_normalize(
             connector,
             source_listings,
-            detail_limit=detail_limit,
+            detail_limit=0,
             geocoder=geocoder,
         )
         new_items = 0
@@ -359,6 +378,14 @@ def _collect_search_candidates(
             seen_ids.add(listing.canonical_id)
             collected.append(listing)
             new_items += 1
+
+        target_detail_count = stage_targets[min(index - 1, len(stage_targets) - 1)]
+        hydrated_now = _hydrate_detail_stage(
+            connector,
+            collected,
+            geocoder=geocoder,
+            target_detail_count=target_detail_count,
+        )
 
         filtered = filter_listings(
             collected,
@@ -377,6 +404,7 @@ def _collect_search_candidates(
         strict_count = sum(
             1
             for listing in filtered
+            if getattr(listing, "detail_hydrated", False)
             if _evaluate_strict_match(
                 listing,
                 city=city,
@@ -395,6 +423,8 @@ def _collect_search_candidates(
                 "provider_results": len(source_listings),
                 "new_candidates": new_items,
                 "strict_match_count": strict_count,
+                "detail_hydrated_count": hydrated_now,
+                "shallow_only_count": max(0, len(collected) - hydrated_now),
             }
         )
         if strict_count >= 2:
@@ -402,7 +432,10 @@ def _collect_search_candidates(
 
     return collected, {
         "provider_results": provider_results,
+        "candidate_pool_size": len(collected),
         "search_rounds": round_summaries,
+        "detail_hydrated_count": sum(1 for listing in collected if getattr(listing, "detail_hydrated", False)),
+        "shallow_only_count": sum(1 for listing in collected if not getattr(listing, "detail_hydrated", False)),
     }
 
 
@@ -444,6 +477,50 @@ def _build_search_rounds(
     if not queries:
         queries.append("")
     return queries[:3]
+
+
+def _detail_stage_targets(*, max_results: int, detail_limit: int) -> list[int]:
+    initial = min(max_results, max(20, detail_limit))
+    second = min(max_results, max(40, initial))
+    third = min(max_results, max(60, second))
+    targets = [initial, second, third]
+    deduped = []
+    for value in targets:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def _hydrate_detail_stage(
+    connector: BasePropertyConnector,
+    listings: list,
+    *,
+    geocoder: NominatimGeocoder,
+    target_detail_count: int,
+) -> int:
+    hydrated = 0
+    for index, listing in enumerate(listings):
+        if index >= target_detail_count:
+            break
+        if getattr(listing, "detail_hydrated", False):
+            hydrated += 1
+            continue
+        if not listing.url:
+            continue
+        try:
+            detailed = connector.get_listing_detail(url=listing.url)
+        except Exception:
+            continue
+        normalized = hydrate_and_normalize(
+            connector,
+            [detailed],
+            detail_limit=0,
+            geocoder=geocoder,
+        )[0]
+        normalized.detail_hydrated = True
+        listings[index] = normalized
+        hydrated += 1
+    return hydrated
 
 
 def _infer_rent_or_sale_intent(keyword: str, explicit_value: str | None) -> str | None:
@@ -522,6 +599,9 @@ def _evaluate_strict_match(
 
     if suspicious:
         tradeoffs.append(listing.price_anomaly.get("reason") or "价格或房源类型存在异常")
+
+    if not getattr(listing, "detail_hydrated", False):
+        tradeoffs.append("当前只有浅层列表数据，缺少详情页核验")
 
     if listing.image_quality in {"placeholder_only", "missing"}:
         tradeoffs.append("图片较少或缺失")
@@ -741,6 +821,10 @@ def _build_candidate_card(
         "canonical_id": item["canonical_id"],
         "title": item["title"],
         "url": item.get("url"),
+        "primary_image_url": item.get("primary_image_url"),
+        "image_urls": item.get("image_urls", []),
+        "image_quality": item.get("image_quality"),
+        "image_note": item.get("image_note"),
         "price_text": item.get("price_text"),
         "monthly_price_value": item.get("monthly_price_value"),
         "location_text": item.get("location_text"),
@@ -759,7 +843,6 @@ def _build_candidate_card(
         "known_fields": item.get("known_fields", []),
         "missing_fields": item.get("missing_fields", []),
         "field_source_summary": field_source_summary,
-        "image_quality": item.get("image_quality"),
         "price_analysis": item.get("price_analysis", {}),
         "compared_advantages": compared_advantages,
         "compared_disadvantages": compared_disadvantages,
@@ -932,12 +1015,20 @@ def _build_decision_summary(
     result_quality: dict[str, object],
     recommendation_count: int,
     watchlist_count: int,
+    candidate_pool_size: int,
+    detail_hydrated_count: int,
+    shallow_only_count: int,
 ) -> str:
+    basis = f"本轮共扫描 {candidate_pool_size} 条平台样本，其中 {detail_hydrated_count} 条进入详情分析"
+    if shallow_only_count:
+        basis += f"，另有 {shallow_only_count} 条仅保留浅层样本。"
+    else:
+        basis += "。"
     if decision_mode == "recommend":
-        return f"这轮结果和你的目标基本一致，我保留了 {recommendation_count} 套最值得先看的候选。"
+        return f"{basis} 这轮结果和你的目标基本一致，我保留了 {recommendation_count} 套最值得先看的候选。"
     if decision_mode == "watchlist":
-        return f"这轮只有 {watchlist_count} 套可继续观察的候选，但还不够稳，不建议直接当成最终推荐。"
-    return "这轮结果更适合帮助你判断平台供给方向，而不是直接替你做选房决定。"
+        return f"{basis} 这轮只有 {watchlist_count} 套可继续观察的候选，但还不够稳，不建议直接当成最终推荐。"
+    return f"{basis} 这轮结果更适合帮助你判断平台供给方向，而不是直接替你做选房决定。"
 
 
 def _build_next_step_suggestions(
@@ -967,6 +1058,18 @@ def _build_next_step_suggestions(
     if area:
         suggestions.append(f"可以继续指定 {area} 内的细分板块，提高结果纯度。")
     return suggestions[:3] or ["先继续补召回，再决定要不要放宽条件。"]
+
+
+def _build_confidence_basis(
+    *,
+    candidate_pool_size: int,
+    detail_hydrated_count: int,
+    shallow_only_count: int,
+) -> str:
+    basis = f"本轮共扫描 {candidate_pool_size} 条平台样本，其中 {detail_hydrated_count} 条进入详情分析"
+    if shallow_only_count:
+        return basis + f"，另有 {shallow_only_count} 条仍是浅层样本。"
+    return basis + "。"
 
 
 def _build_analysis_sections(
@@ -1030,6 +1133,7 @@ def _build_user_facing_response(
     lines = [
         f"一句话判断：{result_judgement}",
         f"总体分析：{query_fit_summary}",
+        f"结论依据：{decision_summary}",
         "",
     ]
     candidate_source = recommended_listings if decision_mode == "recommend" else watchlist_candidates
@@ -1044,6 +1148,10 @@ def _build_user_facing_response(
             lines.append(f"价格：{price_line}")
             if item.get("location_text"):
                 lines.append(f"位置：{item['location_text']}")
+            if item.get("primary_image_url"):
+                lines.append(f"图片：{item['primary_image_url']}")
+            if item.get("image_note"):
+                lines.append("图片说明：" + item["image_note"])
             lines.append("为什么它贴合这次搜索：" + item["fit_for_user"])
             lines.append("为什么它又不是最理想选择：" + item["why_not_ideal"])
             lines.append("这次怎么处理它：" + item["decision_reason"])
@@ -1068,8 +1176,6 @@ def _build_user_facing_response(
                 lines.append("看房前优先确认：" + "；".join(item["must_confirm_questions"][:2]))
             if item.get("price_analysis", {}).get("price_warning"):
                 lines.append("价格提醒：" + item["price_analysis"]["price_warning"])
-            if item.get("image_quality") == "placeholder_only":
-                lines.append("图片提醒：当前只有占位图，无法据此判断真实房屋情况。")
             lines.append(f"更适合谁：{item['suitable_for']}")
             lines.append(f"不太适合谁：{item['not_suitable_for']}")
             if item.get("url"):
@@ -1084,6 +1190,12 @@ def _build_user_facing_response(
     comparison_takeaways = compare_matrix.get("comparison_takeaways") or []
     if comparison_takeaways:
         lines.append("这轮主要比较了什么：" + "；".join(comparison_takeaways))
+    sample_basis = compare_matrix.get("sample_basis")
+    if sample_basis:
+        if "100 条" in sample_basis or "60 条" in sample_basis or "40 条" in sample_basis or "20 条" in sample_basis:
+            lines.append("样本说明：这轮结论基于较大样本池，不是只看前几条结果得出的。")
+        else:
+            lines.append("样本说明：虽然我扩大了搜索范围，但平台当前有效样本仍然有限。")
     if decision_mode != "recommend":
         lines.append("为什么这次不直接推荐：" + analysis_sections["why_not_direct_recommendation"])
     else:
@@ -1119,6 +1231,11 @@ def compare_properties(
     compared.sort(key=lambda item: item["scores"]["total_score"], reverse=True)
     recommendation = compared[0]["canonical_id"] if compared else None
     compare_matrix = build_compare_matrix(compared)
+    compare_matrix["sample_basis"] = f"本轮共比较 {len(compared)} 条已进入详情分析的房源。"
+    compare_matrix["comparison_takeaways"] = [
+        compare_matrix["sample_basis"],
+        *(compare_matrix.get("comparison_takeaways") or []),
+    ]
     field_coverage = summarize_field_coverage(compared)
     return {
         "input": {"urls": urls},
@@ -1196,6 +1313,13 @@ def score_value(
     scores = score_listing(subject, peers)
     compare_candidates = [subject] + [peer for peer in peers if peer.canonical_id != subject.canonical_id]
     compare_matrix = build_compare_matrix(compare_candidates[:3])
+    compare_matrix["sample_basis"] = (
+        f"当前性价比评分基于 {len(compare_candidates[:3])} 条候选比较，其中包含 1 条目标房源详情。"
+    )
+    compare_matrix["comparison_takeaways"] = [
+        compare_matrix["sample_basis"],
+        *(compare_matrix.get("comparison_takeaways") or []),
+    ]
     return {
         "listing": {
             **subject.to_dict(),

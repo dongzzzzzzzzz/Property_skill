@@ -231,6 +231,48 @@ class SkewedNYCRentalConnector:
         return mapping[url]
 
 
+class RecordingConnector:
+    def __init__(self) -> None:
+        self.search_calls = []
+        self.detail_calls = []
+
+    def search_property(self, **kwargs):
+        self.search_calls.append(kwargs)
+        listings = []
+        for index in range(1, 101):
+            listings.append(
+                SourceListing(
+                    provider="ok",
+                    title=f"Candidate {index}",
+                    price_text="SGD 3000/month",
+                    location_text="Bedok, Singapore",
+                    url=f"rec-{index}",
+                )
+            )
+        return listings
+
+    def browse_property(self, **kwargs):
+        return self.search_property(**kwargs)
+
+    def get_listing_detail(self, *, url: str):
+        self.detail_calls.append(url)
+        index = int(url.split("-")[-1])
+        if index <= 20:
+            description = "1 bedroom room listing"
+        else:
+            description = "2 bedroom apartment, furnished, parking, near MRT."
+        return SourceListing(
+            provider="ok",
+            title=f"Candidate {index}",
+            price_text="SGD 3000/month",
+            location_text="Bedok, Singapore",
+            url=url,
+            description=description,
+            image_urls=[f"{url}.jpg"],
+            detail_fetched=True,
+        )
+
+
 class PropertyCWorkflowTests(unittest.TestCase):
     def test_price_period_normalization(self) -> None:
         value, currency, period, monthly, estimated = parse_price("$100 Daily", "short-term apartment")
@@ -427,6 +469,9 @@ class PropertyCWorkflowTests(unittest.TestCase):
         row_labels = [row["label"] for row in payload["compare_matrix"]["rows"]]
         self.assertIn("卫生间", row_labels)
         self.assertIn("关键缺失字段", row_labels)
+        self.assertTrue(candidate["primary_image_url"])
+        self.assertIn("查看详情：", payload["user_facing_response"])
+        self.assertIn("图片：", payload["user_facing_response"])
 
     def test_placeholder_image_is_treated_as_unknown_visual_signal(self) -> None:
         listing = normalize_listing(
@@ -441,6 +486,8 @@ class PropertyCWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(listing.image_quality, "placeholder_only")
         self.assertEqual(listing.field_status["images"], "unknown")
+        self.assertEqual(listing.primary_image_url, "https://sgj1.ok.com/yongjia/_next/static/media/cardDefault.8ee8f7d6.png")
+        self.assertIn("占位图", listing.image_note)
 
     def test_viewing_questions_follow_missing_fields_and_risks(self) -> None:
         listing = normalize_listing(
@@ -460,6 +507,24 @@ class PropertyCWorkflowTests(unittest.TestCase):
         self.assertTrue(any("车位" in question for question in questions["must_confirm_questions"]))
         self.assertTrue(any("宠物" in question for question in questions["must_confirm_questions"]))
         self.assertTrue(any("真实室内照片" in question for question in questions["risk_questions"]))
+
+    def test_default_search_uses_large_candidate_pool_and_reports_basis(self) -> None:
+        connector = RecordingConnector()
+        payload = search_properties(
+            connector,
+            keyword="apartment",
+            country="singapore",
+            city="singapore",
+            bedrooms=2,
+        )
+        self.assertEqual(connector.search_calls[0]["max_results"], 100)
+        self.assertEqual(payload["summary"]["provider_results"], 200)
+        self.assertEqual(payload["summary"]["candidate_pool_size"], 100)
+        self.assertEqual(payload["summary"]["detail_hydrated_count"], 40)
+        self.assertEqual(payload["summary"]["shallow_only_count"], 60)
+        self.assertIn("本轮共扫描 100 条平台样本，其中 40 条进入详情分析", payload["summary"]["confidence_basis"])
+        self.assertIn("本轮共扫描 100 条平台样本，其中 40 条进入详情分析", payload["decision_summary"])
+        self.assertIn("较大样本池", payload["user_facing_response"])
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@
 - `missing_fields`
 - `analysis_sections`
 - `user_facing_response`
+- `summary.confidence_basis`
 
 ## 候选卡片
 
@@ -24,6 +25,9 @@
 - `fit_for_user`
 - `why_not_ideal`
 - `decision_reason`
+- `url`
+- `primary_image_url`
+- `image_note`
 - `compared_advantages`
 - `compared_disadvantages`
 - `missing_fields`
@@ -42,3 +46,5 @@
 - 缺失字段必须显式展示，`unknown` 只能解释成“当前页面没有足够信息支持判断”。
 - `compare_matrix` 优先于自由描述；描述必须引用已知字段、推断字段和未知字段。
 - `field_sources` 和 `decision_mode` 是上层消费的硬约束，不得忽略。
+- `url` 和 `primary_image_url` 是候选卡片主字段，不得省略。
+- 即使 `decision_mode != recommend`，也不能把图片/链接从卡片里拿掉。

@@ -28,6 +28,7 @@ class SourceListing:
     seller_name: str | None = None
     posted_time: str | None = None
     category: str | None = None
+    detail_fetched: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -63,8 +64,11 @@ class NormalizedListing:
     features: list[str] = field(default_factory=list)
     description: str | None = None
     image_urls: list[str] = field(default_factory=list)
+    primary_image_url: str | None = None
+    image_note: str | None = None
     posted_time: str | None = None
     seller_name: str | None = None
+    detail_hydrated: bool = False
     parse_confidence: float = 0.0
     match_reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)

@@ -39,7 +39,7 @@ python scripts/cli.py find_nearby_schools --provider ok --url "<listing-url>"
 - `search_properties` 的返回里优先使用 `decision_mode`、`result_judgement`、`query_fit_summary`、`recommended_listings`、`watchlist_candidates`、`analysis_sections`、`user_facing_response`。
 - 同时优先消费 `compare_matrix`、`field_status`、`known_fields`、`missing_fields`，不要把关键字段缺失隐藏掉。
 - 不要直接把 `listings` 原样平铺给用户；`listings` 主要用于调试和上层二次处理。
-- 推荐区只在 `decision_mode = recommend` 时展示，且优先使用 `recommended_listings[].decision_reason`、`recommended_listings[].why_not_ideal`、`recommended_listings[].url`。
+- 推荐区只在 `decision_mode = recommend` 时展示，且优先使用 `recommended_listings[].decision_reason`、`recommended_listings[].why_not_ideal`、`recommended_listings[].url`、`recommended_listings[].primary_image_url`、`recommended_listings[].image_note`。
 - 当 `decision_mode = watchlist` 时，只能把 `watchlist_candidates` 展示成“可参考观察项”，不能写成“推荐”。
 - 当 `decision_mode = explain_only` 时，先展示 `result_judgement` 和 `query_fit_summary`，不要输出“首选/推荐度/星级”。
 - 不要自己把“特点/卖点”改写成推荐理由；推荐理由必须优先复用结构化字段里的决策解释。
@@ -47,6 +47,8 @@ python scripts/cli.py find_nearby_schools --provider ok --url "<listing-url>"
 - 缺失字段必须显式展示；`unknown` 只能解释为“当前页面没有足够信息支持判断”。
 - `compare_matrix` 优先于自由描述；如果要解释推荐理由，必须引用它对价格、位置、图片质量和关键缺失字段的比较。
 - `field_sources` 和 `decision_mode` 是上层消费的硬约束，不得忽略。
+- 推荐/观察项卡片必须显式提供 `url` 和 `primary_image_url`；即使当前只有占位图，也不能把图片字段省略掉。
+- `user_facing_response` 必须包含详情入口、图片状态说明，以及“本轮到底比较了多少条样本”的说明。
 
 更完整的字段契约见 [output-contract](/Users/a58/Desktop/Property_skill/references/output-contract.md)。
 
